@@ -1,9 +1,7 @@
 #!/bin/bash
-# TeleBox 多实例管理脚本 (v2.4 终极版)
-# 功能：
-# 1. 彻底清理 (包含 .telebox 和 /tmp)
-# 2. 详细的步骤提示
-# 3. 智能命名 & 内存管理 & 信号接管
+# TeleBox 多实例管理脚本 (v2.6 稳定修正版)
+# 修复：无损更新时的 "fatal: couldn't find remote ref master" 错误
+# 原理：自动检测当前 Git 分支 (main/master)，不再硬编码
 # 适用于 Debian / Ubuntu
 
 set -u
@@ -61,7 +59,7 @@ generate_ecosystem() {
     local dir="$2"
     local final_pm2_name="$input_name"
 
-    # 智能命名逻辑
+    # 智能命名
     if [[ "$input_name" != telebox* ]] && [[ "$input_name" != TeleBox* ]]; then
         final_pm2_name="telebox_${input_name}"
     fi
@@ -91,7 +89,6 @@ module.exports = {
 EOF
 }
 
-# 统一清理函数
 perform_cleanup() {
     echo -e "${BLUE}>>> [清理] 1. 停止并删除相关 PM2 进程...${NC}"
     if command -v pm2 >/dev/null 2>&1; then
@@ -175,15 +172,18 @@ add_new_instance() {
     cd "$dir"
     npm install --prefer-offline --no-audit
 
-    echo -e "${YELLOW}==============================================${NC}"
-    echo -e "${YELLOW}>>> [4/5] 交互式登录 <<<${NC}"
-    echo -e "${YELLOW}请根据提示输入手机号/验证码。${NC}"
-    echo -e "${YELLOW}登录成功后请按 CTRL+C，脚本会自动接管。${NC}"
-    echo -e "${YELLOW}==============================================${NC}"
-    read -p "按回车键开始登录..."
+    echo -e "${YELLOW}======================================================${NC}"
+    echo -e "${YELLOW}>>> [4/5] 交互式登录 (请仔细阅读) <<<${NC}"
+    echo -e "1. 输入手机号和验证码登录"
+    echo -e "2. 当看到日志显示: ${GREEN}You should now be connected.${NC}"
+    echo -e "3. ${RED}必须手动按 Ctrl+C 结束前台进程${NC}，脚本才会继续！"
+    echo -e "${YELLOW}======================================================${NC}"
+
+    read -p "我已理解，看到连接成功后按 Ctrl+C (按回车继续)..."
+    echo -e "\n${RED}>>> [等待登录] 看到 'You should now be connected.' 后 -> 请立即按 Ctrl+C <<<${NC}\n"
 
     set +e
-    trap 'echo -e "\n${GREEN}>>> 检测到用户中断，正在转入后台配置...${NC}"' SIGINT
+    trap 'echo -e "\n${GREEN}>>> 检测到用户中断 (Ctrl+C)，正在转入后台配置...${NC}"' SIGINT
     npm start
     trap - SIGINT
     set -e
@@ -199,7 +199,7 @@ add_new_instance() {
     echo -e "内存限制策略: ${MAX_MEMORY}MB (自动GC)"
 }
 
-# [功能3] 无损更新
+# [功能3] 无损更新 (修复 Git 分支问题)
 update_lossless() {
     echo -e "${BLUE}==== 无损更新 (保留 Session) ====${NC}"
     local instances=$(get_instances)
@@ -212,18 +212,18 @@ update_lossless() {
         if [ ! -d "$dir" ]; then continue; fi
         cd "$dir"
 
-        echo "   - 更新配置文件..."
+        echo "   - 更新配置..."
         generate_ecosystem "$inst" "$dir"
-
         echo "   - 停止服务..."
         pm2 stop ecosystem.config.js 2>/dev/null || true
 
-        echo "   - 拉取新代码..."
-        git pull origin master || echo -e "${RED}Git 拉取失败${NC}"
+        echo "   - 拉取代码..."
+        # 修复：自动检测当前分支 (main 或 master)，而不是写死 master
+        local current_branch=$(git rev-parse --abbrev-ref HEAD)
+        git pull origin "$current_branch" || echo -e "${RED}Git 拉取失败 (请检查网络或冲突)${NC}"
 
         echo "   - 更新依赖..."
         npm install --prefer-offline --no-audit
-
         echo "   - 重启服务..."
         pm2 restart ecosystem.config.js
         echo -e "${GREEN}✔ $inst 更新完成${NC}"
@@ -263,7 +263,7 @@ reinstall_core_lossless() {
         rm -rf "$dir"
         mkdir -p "$dir"
 
-        echo "   - 重新下载代码..."
+        echo "   - 重新下载..."
         git clone "$GITHUB_REPO" "$dir"
         cd "$dir"
         npm install --prefer-offline --no-audit
@@ -283,7 +283,6 @@ reinstall_core_lossless() {
 memory_gc_info() {
     echo -e "${BLUE}==== 内存状态监控 ====${NC}"
     if command -v pm2 >/dev/null 2>&1; then
-        # 只要包含 telebox 字符的进程都显示
         pm2 list | grep -iE "telebox|App name|id" || echo "无运行中的 TeleBox 进程"
     else
         echo "PM2 未运行"
@@ -295,7 +294,6 @@ uninstall_all() {
     echo -e "${RED}==== 卸载全部 ====${NC}"
     read -p "确认彻底删除所有数据（含缓存和配置）？(y/N): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi
-
     perform_cleanup
 }
 
@@ -303,7 +301,7 @@ uninstall_all() {
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.4)         #${NC}"
+    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.6)         #${NC}"
     echo -e "${BLUE}#############################################${NC}"
     echo -e "1. 全新安装 (彻底清理并新建)"
     echo -e "2. 添加新实例 (自定义命名)"
