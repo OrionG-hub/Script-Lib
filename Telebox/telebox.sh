@@ -1,7 +1,8 @@
 #!/bin/bash
-# TeleBox 多实例管理脚本 (v2.20 卸载优化版)
-# 新增：[卸载管理] 支持卸载单个实例 或 卸载全部
-# 保留：智能安装、自动GC、旧版导入、无损更新
+# TeleBox 多实例管理脚本 (v2.21 最终稳定版)
+# 修复：[全新安装] "Unable to read current working directory" 报错
+# 原理：在删除旧文件前，强制跳转回 $HOME 目录，防止脚本悬空
+# 包含：卸载管理、智能安装、自动GC、旧版导入
 # 适用于 Debian / Ubuntu (x86/ARM)
 
 set -u
@@ -99,15 +100,17 @@ smart_npm_install() {
     fi
 }
 
-# 彻底清理所有内容
+# 核心修复：彻底清理所有内容前，先跳回安全目录
 perform_cleanup_all() {
+    # [修复点] 强制跳回 HOME 目录，防止脚本悬空
+    cd "$HOME" || true
+
     echo -e "${BLUE}>>> [清理] 停止进程并删除所有文件...${NC}"
     if command -v pm2 >/dev/null 2>&1; then pm2 delete /telebox/ 2>/dev/null || true; pm2 save >/dev/null 2>&1; fi
     rm -rf "$MANAGER_ROOT" "$LEGACY_APP_DIR" "$HOME/.telebox"* "/tmp/telebox"*
     echo -e "${GREEN}>>> [清理] 全部完成！${NC}"
 }
 
-# 核心：通用数据迁移逻辑
 handle_data_migration() {
     local src="$1"
     local dest="$2"
@@ -161,7 +164,12 @@ clean_reinstall_all() {
     echo -e "${RED}==== 全新安装 ====${NC}"
     read -p "确认清除所有数据？(y/N): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi
+
     perform_cleanup_all
+
+    # 强制重新进入 HOME，确保安全
+    cd "$HOME" || true
+
     init_environment_checks
     echo -e "${GREEN}>>> 3秒后开始安装...${NC}"
     sleep 3
@@ -221,44 +229,31 @@ update_lossless() {
     done
 }
 
-# [功能5] 卸载管理逻辑
 uninstall_logic() {
     echo -e "${RED}==== 卸载管理 ====${NC}"
     local instances=$(get_instances)
-
     if [ -z "$instances" ]; then
-        echo -e "${YELLOW}当前无受管实例。${NC}"
+        echo -e "${YELLOW}无受管实例。${NC}"
         read -p "是否彻底清除管理器及残留文件？(y/N): " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then perform_cleanup_all; fi
         return
     fi
-
     echo -e "当前实例: ${YELLOW}$(echo $instances | xargs)${NC}"
-    echo -e "1. 输入 ${GREEN}实例名称${NC} 仅卸载该实例 (数据会丢失)"
-    echo -e "2. 输入 ${RED}all${NC} 卸载全部并清除管理器"
+    echo -e "1. 输入 ${GREEN}实例名称${NC} 仅卸载该实例"
+    echo -e "2. 输入 ${RED}all${NC} 卸载全部"
     echo
     read -p "请输入目标: " target
-
     if [ "$target" == "all" ]; then
         read -p "确认彻底删除所有内容？(y/N): " confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then perform_cleanup_all; fi
     else
-        # 检查实例是否存在
         local dir="$INSTANCES_DIR/$target"
-        if [ ! -d "$dir" ]; then
-            echo -e "${RED}错误：未找到实例 [$target]${NC}"
-            return
-        fi
+        if [ ! -d "$dir" ]; then echo -e "${RED}错误：未找到实例${NC}"; return; fi
+        echo -e "${BLUE}正在卸载: $target ...${NC}"
+        if [ -f "$dir/ecosystem.config.js" ]; then cd "$dir"; pm2 delete ecosystem.config.js 2>/dev/null || true; pm2 save >/dev/null 2>&1; fi
 
-        echo -e "${BLUE}正在卸载单个实例: $target ...${NC}"
-        # 停止 PM2
-        if [ -f "$dir/ecosystem.config.js" ]; then
-            cd "$dir"
-            pm2 delete ecosystem.config.js 2>/dev/null || true
-            pm2 save >/dev/null 2>&1
-        fi
-        # 删除目录
-        cd "$MANAGER_ROOT" || cd "$HOME"
+        # [修复点] 删除子目录前，也要跳回 HOME
+        cd "$HOME" || true
         rm -rf "$dir"
         echo -e "${GREEN}✔ 实例 $target 已卸载${NC}"
     fi
@@ -269,7 +264,7 @@ memory_gc_info() { echo -e "${BLUE}==== 内存状态 ====${NC}"; if command -v p
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.20)        #${NC}"
+    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.21)        #${NC}"
     echo -e "${BLUE}#############################################${NC}"
     echo -e "1. 全新安装 (清理+新建)"
     echo -e "2. 添加实例"
