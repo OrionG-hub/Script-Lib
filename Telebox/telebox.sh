@@ -1,7 +1,7 @@
 #!/bin/bash
-# TeleBox 多实例管理脚本 (v2.21 最终稳定版)
-# 修复：[全新安装] "Unable to read current working directory" 报错
-# 原理：在删除旧文件前，强制跳转回 $HOME 目录，防止脚本悬空
+# TeleBox 多实例管理脚本 (v2.22 官方依赖对齐版)
+# 修复 1：[全新安装] 删除目录前强制跳回 HOME，解决 "Unable to read current working directory"
+# 修复 2：[环境检查] 强制执行 apt update & install build-essential，解决编译依赖缺失
 # 包含：卸载管理、智能安装、自动GC、旧版导入
 # 适用于 Debian / Ubuntu (x86/ARM)
 
@@ -32,24 +32,34 @@ handle_error() {
     fi
 }
 
+# [核心修改] 强制环境检查，严格对齐官方教程
 init_environment_checks() {
-    echo -e "${BLUE}>>> [环境准备] 检查系统依赖...${NC}"
-    if ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
-        echo -e "${YELLOW}>>> [环境补全] 安装编译工具...${NC}"
-        sudo apt-get update || true
-        sudo apt-get install -y curl git build-essential g++ make python3 python-is-python3 || true
-    fi
+    echo -e "${BLUE}>>> [环境准备] 正在执行官方依赖安装步骤...${NC}"
+
+    # 1. 强制更新源列表 (解决 apt 找不到包的问题)
+    echo -e "${CYAN}   - 更新系统源列表 (sudo apt update)...${NC}"
+    sudo apt-get update || echo -e "${YELLOW}   ! 源更新遇到小问题，尝试继续安装...${NC}"
+
+    # 2. 强制安装构建工具 (解决 g++/make 缺失)
+    echo -e "${CYAN}   - 安装基础构建工具 (build-essential)...${NC}"
+    # 这里不再判断是否存在，而是直接运行 install，确保 build-essential 完整
+    sudo apt-get install -y curl git build-essential g++ make python3 python-is-python3 || true
+
+    # 3. Node.js
     if ! command -v node >/dev/null 2>&1; then
-        echo -e "${YELLOW}>>> [环境补全] 安装 Node.js ${NODE_VERSION}...${NC}"
+        echo -e "${CYAN}   - 安装 Node.js ${NODE_VERSION}...${NC}"
         curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | sudo -E bash -
         sudo apt-get install -y nodejs
     fi
+
+    # 4. PM2
     if ! command -v pm2 >/dev/null 2>&1; then
-        echo -e "${YELLOW}>>> [环境补全] 安装 PM2...${NC}"
+        echo -e "${CYAN}   - 安装 PM2...${NC}"
         sudo npm install -g pm2
     fi
+
     mkdir -p "$INSTANCES_DIR"
-    echo -e "${GREEN}>>> [环境准备] 就绪！${NC}"
+    echo -e "${GREEN}>>> [环境准备] 依赖安装完毕！${NC}"
     echo
 }
 
@@ -100,9 +110,9 @@ smart_npm_install() {
     fi
 }
 
-# 核心修复：彻底清理所有内容前，先跳回安全目录
+# [核心修改] 清理前强制跳回 HOME
 perform_cleanup_all() {
-    # [修复点] 强制跳回 HOME 目录，防止脚本悬空
+    # 防止脚本因为当前目录被删而报错
     cd "$HOME" || true
 
     echo -e "${BLUE}>>> [清理] 停止进程并删除所有文件...${NC}"
@@ -165,12 +175,15 @@ clean_reinstall_all() {
     read -p "确认清除所有数据？(y/N): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi
 
+    # 1. 清理
     perform_cleanup_all
 
-    # 强制重新进入 HOME，确保安全
+    # 2. 确保安全目录
     cd "$HOME" || true
 
+    # 3. 安装依赖 (官方步骤)
     init_environment_checks
+
     echo -e "${GREEN}>>> 3秒后开始安装...${NC}"
     sleep 3
     add_new_instance_logic
@@ -196,9 +209,14 @@ add_new_instance_logic() {
     mkdir -p "$dir"
     echo -e "${CYAN}>>> [2/5] 克隆代码...${NC}"
     git clone "$GITHUB_REPO" "$dir"
+
     echo -e "${CYAN}>>> [3/5] 安装依赖...${NC}"
+    # 再次确保目录正确
+    if [ ! -d "$dir" ]; then echo -e "${RED}目录创建失败，请检查权限。${NC}"; return; fi
     cd "$dir"
+
     smart_npm_install
+
     echo -e "${YELLOW}>>> [4/5] 交互登录: 看到 Connected 后按 Ctrl+C <<<${NC}"
     read -p "按回车继续..."
     echo -e "\n${RED}>>> [等待] 看到 'You should now be connected.' 后 -> 按 Ctrl+C <<<${NC}\n"
@@ -251,8 +269,6 @@ uninstall_logic() {
         if [ ! -d "$dir" ]; then echo -e "${RED}错误：未找到实例${NC}"; return; fi
         echo -e "${BLUE}正在卸载: $target ...${NC}"
         if [ -f "$dir/ecosystem.config.js" ]; then cd "$dir"; pm2 delete ecosystem.config.js 2>/dev/null || true; pm2 save >/dev/null 2>&1; fi
-
-        # [修复点] 删除子目录前，也要跳回 HOME
         cd "$HOME" || true
         rm -rf "$dir"
         echo -e "${GREEN}✔ 实例 $target 已卸载${NC}"
@@ -264,7 +280,7 @@ memory_gc_info() { echo -e "${BLUE}==== 内存状态 ====${NC}"; if command -v p
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.21)        #${NC}"
+    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.22)        #${NC}"
     echo -e "${BLUE}#############################################${NC}"
     echo -e "1. 全新安装 (清理+新建)"
     echo -e "2. 添加实例"
