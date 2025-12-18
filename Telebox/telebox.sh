@@ -1,6 +1,6 @@
 #!/bin/bash
-# TeleBox 多实例管理脚本 (修复增强版)
-# 功能：多进程隔离、自定义命名、无损更新/重装、智能内存GC (192MB)
+# TeleBox 多实例管理脚本 (v2.1 修复版)
+# 修复了 Ctrl+C 导致脚本直接退出、无法执行 PM2 托管的问题
 # 适用于 Debian / Ubuntu
 
 set -u
@@ -23,15 +23,13 @@ readonly NC='\033[0m'
 
 # ================= 基础工具函数 =================
 
-# 错误捕获（非致命错误不退出，致命错误手动处理）
+# 错误捕获
 handle_error() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
         echo -e "${RED}[错误] 操作在第 $1 行执行失败 (退出码: $exit_code)。${NC}"
     fi
 }
-# 仅在关键操作开启 trap，避免误杀交互式输入
-# trap 'handle_error $LINENO' ERR
 
 # 检查环境依赖
 check_dependencies() {
@@ -48,7 +46,6 @@ check_dependencies() {
         sudo npm install -g pm2
     fi
 
-    # 确保基础目录存在
     mkdir -p "$INSTANCES_DIR"
 }
 
@@ -109,26 +106,21 @@ clean_reinstall_all() {
 
     echo -e "${BLUE}>>> 正在清理旧环境...${NC}"
 
-    # 1. 清理 PM2
     if command -v pm2 >/dev/null 2>&1; then
         pm2 delete /telebox_/ 2>/dev/null || true
         pm2 save >/dev/null 2>&1
     fi
 
-    # 2. 清理文件
     rm -rf "$MANAGER_ROOT"
 
     echo -e "${GREEN}>>> 环境已重置。准备开始安装...${NC}"
     sleep 1
 
-    # 3. 重建目录
     mkdir -p "$INSTANCES_DIR"
-
-    # 4. 直接进入添加实例流程
-    add_new_instance "default" # 默认建议名称
+    add_new_instance "default"
 }
 
-# [功能2] 添加新实例
+# [功能2] 添加新实例 (修复了 Ctrl+C 退出问题)
 add_new_instance() {
     local default_name="${1:-}"
     echo -e "${BLUE}==== 添加新 TeleBox 实例 ====${NC}"
@@ -145,7 +137,6 @@ add_new_instance() {
         echo -e "${RED}名称不能为空！${NC}"; return;
     fi
 
-    # 名称校验
     if [[ ! "$inst_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
         echo -e "${RED}名称非法！仅支持字母、数字、下划线。${NC}"
         return
@@ -179,13 +170,25 @@ add_new_instance() {
     echo -e "${YELLOW}==============================================${NC}"
     read -p "按回车键开始登录..."
 
-    # 临时忽略错误以允许 Ctrl+C
+    # ================= 关键修复开始 =================
+
+    # 1. 临时关闭 'set -e'，防止 npm 退出码导致脚本退出
     set +e
+
+    # 2. 设置陷阱 (Trap)：当捕获到 SIGINT (Ctrl+C) 时，不退出脚本，而是打印一条信息
+    # 这样只有子进程 (npm) 会终止，而此脚本会继续向下执行
+    trap 'echo -e "\n${GREEN}>>> 检测到用户中断操作，正在转入后台配置...${NC}"' SIGINT
+
+    # 3. 启动前台登录
     npm start
-    local exit_code=$?
+
+    # 4. 恢复陷阱和错误检查
+    trap - SIGINT
     set -e
 
-    echo -e "\n${GREEN}>>> 登录步骤结束。正在配置 PM2 后台托管...${NC}"
+    # ================= 关键修复结束 =================
+
+    echo -e "\n${GREEN}>>> 正在配置 PM2 后台托管...${NC}"
 
     mkdir -p "$dir/logs"
     generate_ecosystem "$inst_name" "$dir"
@@ -214,25 +217,19 @@ update_lossless() {
         if [ ! -d "$dir" ]; then continue; fi
         cd "$dir"
 
-        # 停止
         pm2 stop "$pm2_name" 2>/dev/null || true
 
-        # Git 拉取
         echo "拉取最新代码..."
         git pull origin master || echo -e "${RED}Git 拉取失败，跳过该实例${NC}"
 
-        # 依赖更新
         echo "更新依赖..."
         npm install --prefer-offline --no-audit
 
-        # 更新配置
         generate_ecosystem "$inst" "$dir"
 
-        # 重启
         pm2 restart "$pm2_name"
         echo -e "${GREEN}✔ 实例 $inst 更新完成${NC}"
     done
-
     echo -e "${GREEN}所有任务完成。${NC}"
 }
 
@@ -262,7 +259,6 @@ reinstall_core_lossless() {
         local pm2_name="telebox_$inst"
         local temp_session="/tmp/telebox_session_backup_$inst"
 
-        # 备份
         rm -rf "$temp_session"
         if [ -d "$dir/session" ]; then
             echo "备份 Session..."
@@ -271,24 +267,20 @@ reinstall_core_lossless() {
             echo -e "${YELLOW}未发现 Session，将执行全新重装${NC}"
         fi
 
-        # 删除与重建
         pm2 delete "$pm2_name" 2>/dev/null || true
         rm -rf "$dir"
         mkdir -p "$dir"
 
-        # 下载
         git clone "$GITHUB_REPO" "$dir"
         cd "$dir"
         npm install --prefer-offline --no-audit
 
-        # 还原
         if [ -d "$temp_session" ]; then
             echo "还原 Session..."
             rm -rf "$dir/session"
             mv "$temp_session" "$dir/session"
         fi
 
-        # 启动
         mkdir -p "$dir/logs"
         generate_ecosystem "$inst" "$dir"
         pm2 start ecosystem.config.js
@@ -303,7 +295,6 @@ memory_gc_info() {
     echo -e "策略: 超过 ${YELLOW}${MAX_MEMORY}MB${NC} 自动执行 GC (不杀进程)"
     echo -e "----------------------------------------"
     if command -v pm2 >/dev/null 2>&1; then
-        # 仅显示 telebox 相关进程
         pm2 list | grep -E "telebox_|App name|id" || echo "无运行中的 TeleBox 进程"
     else
         echo "PM2 未运行"
@@ -330,7 +321,7 @@ uninstall_all() {
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.0)         #${NC}"
+    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.1)         #${NC}"
     echo -e "${BLUE}#############################################${NC}"
     echo -e "${GREEN}1.${NC} 全新安装 (重置环境并新建)"
     echo -e "${GREEN}2.${NC} 添加新实例 (自定义命名)"
