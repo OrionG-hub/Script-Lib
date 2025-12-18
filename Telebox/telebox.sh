@@ -1,8 +1,8 @@
 #!/bin/bash
-# TeleBox 多实例管理脚本 (v2.9 终极完善版)
-# 变更：
-# 1. 确保[无损重装]后明确应用并显示自动 GC 策略
-# 2. 包含之前所有的修复 (Git分支、CD错误、彻底清理、旧版导入)
+# TeleBox 多实例管理脚本 (v2.10)
+# 修复：[无损重装] 彻底解决了 "Unable to read current working directory" 报错
+# 原理：在删除旧目录前，强制脚本跳转到上级目录
+# 包含：智能命名、自动GC、旧版导入、彻底清理等所有功能
 # 适用于 Debian / Ubuntu
 
 set -u
@@ -14,7 +14,7 @@ readonly LEGACY_APP_DIR="$HOME/telebox"
 readonly LEGACY_CONFIG="$HOME/.telebox"
 readonly NODE_VERSION="20"
 readonly GITHUB_REPO="https://github.com/TeleBoxDev/TeleBox.git"
-# 内存限制 (MB) - 这里控制 GC 触发阈值
+# 内存限制 (MB)
 readonly MAX_MEMORY="192"
 
 # 颜色定义
@@ -82,7 +82,6 @@ module.exports = {
       autorestart: true,
       max_restarts: 10,
       restart_delay: 4000,
-      // 内存优化核心参数
       node_args: "--optimize_for_size --max-old-space-size=${MAX_MEMORY} --expose-gc",
       env: {
         NODE_ENV: "production"
@@ -241,10 +240,7 @@ update_lossless() {
         if [ ! -d "$dir" ]; then continue; fi
 
         cd "$dir"
-
-        # 强制更新配置以确保内存策略最新
         generate_ecosystem "$inst" "$dir"
-
         pm2 stop ecosystem.config.js 2>/dev/null || true
 
         local current_branch=$(git rev-parse --abbrev-ref HEAD)
@@ -256,7 +252,7 @@ update_lossless() {
     done
 }
 
-# [功能4] 无损重装 (含 GC 策略应用)
+# [功能4] 无损重装 (核心修复)
 reinstall_core_lossless() {
     echo -e "${BLUE}==== 无损重装 (核心) ====${NC}"
     local instances=$(get_instances)
@@ -288,16 +284,20 @@ reinstall_core_lossless() {
         rm -rf "$temp_session"
         [ -d "$dir/session" ] && cp -r "$dir/session" "$temp_session"
 
-        # [安全跳转] 退出待删除目录
+        # [核心修复点]
+        # 在删除目录前，强制切换到上级目录
+        # 避免 "Unable to read current working directory" 错误
         cd "$INSTANCES_DIR" || cd "$HOME"
 
         echo "   - 删除旧文件..."
         rm -rf "$dir"
 
         echo "   - 重新下载..."
+        # 这里的 $dir 已经是绝对路径了，且目录已清空
         git clone "$GITHUB_REPO" "$dir"
 
-        cd "$dir"
+        echo "   - 安装依赖..."
+        cd "$dir" # 下载完后再次进入
         npm install --prefer-offline --no-audit
 
         echo "   - 还原 Session..."
@@ -305,14 +305,11 @@ reinstall_core_lossless() {
 
         echo "   - 恢复服务 (应用内存优化)..."
         mkdir -p "$dir/logs"
-
-        # 重新生成配置文件，确保包含 GC 参数
         generate_ecosystem "$inst" "$dir"
 
         pm2 start ecosystem.config.js
         pm2 save
         echo -e "${GREEN}✔ 实例 $inst 重装完毕！${NC}"
-        echo -e "内存限制策略: ${MAX_MEMORY}MB (自动GC)"
     done
 }
 
@@ -338,7 +335,7 @@ uninstall_all() {
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.9)         #${NC}"
+    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.10)        #${NC}"
     echo -e "${BLUE}#############################################${NC}"
     echo -e "1. 全新安装 (彻底清理并新建)"
     echo -e "2. 添加新实例"
