@@ -1,7 +1,9 @@
 #!/bin/bash
-# TeleBox 多实例管理脚本 (v2.6 稳定修正版)
-# 修复：无损更新时的 "fatal: couldn't find remote ref master" 错误
-# 原理：自动检测当前 Git 分支 (main/master)，不再硬编码
+# TeleBox 多实例管理脚本 (v2.7 迁移增强版)
+# 新增功能：
+# 1. 自动检测并导入手动安装的旧版 TeleBox (位于 ~/telebox)
+# 2. 卸载功能增强：覆盖删除旧版目录
+# 3. 修复了对旧版实例“视而不见”的问题
 # 适用于 Debian / Ubuntu
 
 set -u
@@ -9,10 +11,12 @@ set -u
 # ================= 配置区域 =================
 readonly MANAGER_ROOT="$HOME/telebox_manager"
 readonly INSTANCES_DIR="$MANAGER_ROOT/instances"
+# 旧版默认安装位置
+readonly LEGACY_APP_DIR="$HOME/telebox"
 readonly LEGACY_CONFIG="$HOME/.telebox"
 readonly NODE_VERSION="20"
 readonly GITHUB_REPO="https://github.com/TeleBoxDev/TeleBox.git"
-# 内存限制 (MB)，超过此数值触发 GC
+# 内存限制 (MB)
 readonly MAX_MEMORY="192"
 
 # 颜色定义
@@ -59,7 +63,6 @@ generate_ecosystem() {
     local dir="$2"
     local final_pm2_name="$input_name"
 
-    # 智能命名
     if [[ "$input_name" != telebox* ]] && [[ "$input_name" != TeleBox* ]]; then
         final_pm2_name="telebox_${input_name}"
     fi
@@ -92,6 +95,7 @@ EOF
 perform_cleanup() {
     echo -e "${BLUE}>>> [清理] 1. 停止并删除相关 PM2 进程...${NC}"
     if command -v pm2 >/dev/null 2>&1; then
+        # 宽泛删除，确保旧的 'telebox' 进程也被干掉
         pm2 delete /telebox/ 2>/dev/null || true
         pm2 save >/dev/null 2>&1
     fi
@@ -99,10 +103,14 @@ perform_cleanup() {
     echo -e "${BLUE}>>> [清理] 2. 删除管理器目录 ($MANAGER_ROOT)...${NC}"
     rm -rf "$MANAGER_ROOT"
 
-    echo -e "${BLUE}>>> [清理] 3. 删除残留配置 ($LEGACY_CONFIG)...${NC}"
+    echo -e "${BLUE}>>> [清理] 3. 删除旧版安装目录 ($LEGACY_APP_DIR)...${NC}"
+    # 核心修复：增加对旧目录的删除
+    rm -rf "$LEGACY_APP_DIR"
+
+    echo -e "${BLUE}>>> [清理] 4. 删除残留配置 ($LEGACY_CONFIG)...${NC}"
     rm -rf "$LEGACY_CONFIG"*
 
-    echo -e "${BLUE}>>> [清理] 4. 删除临时缓存 (/tmp/telebox*)...${NC}"
+    echo -e "${BLUE}>>> [清理] 5. 删除临时缓存 (/tmp/telebox*)...${NC}"
     rm -rf "/tmp/telebox"*
 
     echo -e "${GREEN}>>> [清理] 系统清理完毕！${NC}"
@@ -110,11 +118,60 @@ perform_cleanup() {
 
 # ================= 核心功能模块 =================
 
+# [功能7] 导入旧版 (Migration)
+import_legacy() {
+    if [ ! -d "$LEGACY_APP_DIR" ]; then
+        echo -e "${RED}未检测到旧版目录 ($LEGACY_APP_DIR)，无需导入。${NC}"
+        return
+    fi
+
+    echo -e "${BLUE}==== 导入旧版 TeleBox ====${NC}"
+    echo -e "检测到手动安装的旧版本位于: $LEGACY_APP_DIR"
+    echo -e "导入后，它将变为受管实例，支持无损更新、重装等功能。"
+    echo
+
+    read -p "请为导入的实例命名 (例如: legacy, old): " input_name
+    local inst_name="${input_name:-legacy}"
+
+    # 名称检查
+    if [[ ! "$inst_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo -e "${RED}名称非法！${NC}"; return;
+    fi
+
+    local target_dir="$INSTANCES_DIR/$inst_name"
+    if [ -d "$target_dir" ]; then
+        echo -e "${RED}目标实例 [$inst_name] 已存在！请换个名字。${NC}"; return;
+    fi
+
+    echo -e "${CYAN}>>> [1/4] 停止旧进程...${NC}"
+    pm2 delete telebox 2>/dev/null || true
+    pkill -f "telebox" 2>/dev/null || true
+
+    echo -e "${CYAN}>>> [2/4] 迁移文件到新目录...${NC}"
+    # 移动旧目录到新架构下
+    mv "$LEGACY_APP_DIR" "$target_dir"
+
+    echo -e "${CYAN}>>> [3/4] 升级环境与依赖...${NC}"
+    cd "$target_dir"
+    # 确保 npm 依赖是新的
+    npm install --prefer-offline --no-audit
+
+    echo -e "${CYAN}>>> [4/4] 生成新配置并接管...${NC}"
+    mkdir -p "$target_dir/logs"
+    generate_ecosystem "$inst_name" "$target_dir"
+
+    pm2 start ecosystem.config.js
+    pm2 save
+
+    echo -e "${GREEN}✔ 导入成功！旧版已迁移为实例: [$inst_name]${NC}"
+    echo -e "现在你可以对它使用更新、重装等功能了。"
+}
+
 # [功能1] 全新安装
 clean_reinstall_all() {
     echo -e "${RED}====================================================${NC}"
     echo -e "${RED}⚠️  警告：[全新安装] 将执行以下操作：${NC}"
-    echo -e "${RED}1. 彻底清除所有 TeleBox 进程、数据、配置、缓存${NC}"
+    echo -e "${RED}1. 彻底清除所有 TeleBox (含旧版和新版)${NC}"
     echo -e "${RED}2. 重新初始化环境${NC}"
     echo -e "${RED}====================================================${NC}"
 
@@ -199,11 +256,11 @@ add_new_instance() {
     echo -e "内存限制策略: ${MAX_MEMORY}MB (自动GC)"
 }
 
-# [功能3] 无损更新 (修复 Git 分支问题)
+# [功能3] 无损更新
 update_lossless() {
     echo -e "${BLUE}==== 无损更新 (保留 Session) ====${NC}"
     local instances=$(get_instances)
-    if [ -z "$instances" ]; then echo -e "${YELLOW}无实例。${NC}"; return; fi
+    if [ -z "$instances" ]; then echo -e "${YELLOW}无管理实例。如需更新旧版，请先执行[7. 导入旧版]。${NC}"; return; fi
 
     for inst in $instances; do
         echo -e "${CYAN}>>> 正在处理实例: [ $inst ] ...${NC}"
@@ -218,9 +275,8 @@ update_lossless() {
         pm2 stop ecosystem.config.js 2>/dev/null || true
 
         echo "   - 拉取代码..."
-        # 修复：自动检测当前分支 (main 或 master)，而不是写死 master
         local current_branch=$(git rev-parse --abbrev-ref HEAD)
-        git pull origin "$current_branch" || echo -e "${RED}Git 拉取失败 (请检查网络或冲突)${NC}"
+        git pull origin "$current_branch" || echo -e "${RED}Git 拉取失败${NC}"
 
         echo "   - 更新依赖..."
         npm install --prefer-offline --no-audit
@@ -234,7 +290,7 @@ update_lossless() {
 reinstall_core_lossless() {
     echo -e "${BLUE}==== 无损重装 (保留登录，重装核心) ====${NC}"
     local instances=$(get_instances)
-    if [ -z "$instances" ]; then echo -e "${YELLOW}无实例。${NC}"; return; fi
+    if [ -z "$instances" ]; then echo -e "${YELLOW}无管理实例。如需重装旧版，请先执行[7. 导入旧版]。${NC}"; return; fi
 
     echo "当前实例: $instances" | xargs
     read -p "输入要重装的实例名称 (输入 'all' 重装所有): " target
@@ -244,7 +300,7 @@ reinstall_core_lossless() {
         list_to_process=$instances
     else
         if [ ! -d "$INSTANCES_DIR/$target" ]; then echo -e "${RED}不存在。${NC}"; return; fi
-        list_to_process="$target"
+        list_to_process=$target
     fi
 
     for inst in $list_to_process; do
@@ -292,7 +348,8 @@ memory_gc_info() {
 # [功能6] 卸载全部
 uninstall_all() {
     echo -e "${RED}==== 卸载全部 ====${NC}"
-    read -p "确认彻底删除所有数据（含缓存和配置）？(y/N): " confirm
+    echo -e "${RED}警告：这将删除所有管理器实例 AND 旧版安装目录 ($LEGACY_APP_DIR)${NC}"
+    read -p "确认彻底删除？(y/N): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi
     perform_cleanup
 }
@@ -301,18 +358,27 @@ uninstall_all() {
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.6)         #${NC}"
+    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.7)         #${NC}"
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "1. 全新安装 (彻底清理并新建)"
+    echo -e "1. 全新安装 (彻底清理旧版/新版并新建)"
     echo -e "2. 添加新实例 (自定义命名)"
-    echo -e "3. 无损更新 (保留数据)"
-    echo -e "4. 无损重装 (仅重装核心)"
+    echo -e "3. 无损更新 (仅限已导入的实例)"
+    echo -e "4. 无损重装 (仅限已导入的实例)"
     echo -e "5. 查看内存状态"
-    echo -e "6. 卸载全部"
+    echo -e "6. 卸载全部 (含旧版清理)"
+
+    # 动态显示导入选项
+    if [ -d "$LEGACY_APP_DIR" ]; then
+        echo -e "${YELLOW}7. [✨发现旧版] 导入旧版 TeleBox${NC}"
+    fi
+
     echo -e "0. 退出"
     echo -e "${BLUE}#############################################${NC}"
     local instances=$(get_instances)
-    echo -e "当前实例: ${YELLOW}${instances:-无}${NC}"
+    echo -e "当前受管实例: ${YELLOW}${instances:-无}${NC}"
+    if [ -d "$LEGACY_APP_DIR" ]; then
+        echo -e "未导入旧版: ${RED}存在 (在 ~/telebox)${NC}"
+    fi
     echo
 }
 
@@ -320,7 +386,7 @@ main() {
     check_dependencies
     while true; do
         show_menu
-        read -p "请选择 [0-6]: " choice
+        read -p "请选择 [0-7]: " choice
         echo
         case $choice in
             1) clean_reinstall_all ;;
@@ -329,6 +395,7 @@ main() {
             4) reinstall_core_lossless ;;
             5) memory_gc_info ;;
             6) uninstall_all ;;
+            7) import_legacy ;;
             0) exit 0 ;;
             *) echo "无效选项" ;;
         esac
