@@ -1,0 +1,67 @@
+######################
+# macOS
+######################
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+
+######################
+# IntelliJ IDEA
+######################
+# 忽略个人工作区配置（如窗口布局、历史记录）
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/usage.statistics.xml
+.idea/**/dictionaries
+.idea/**/shelf
+
+# 忽略数据库、本地数据源
+.idea/**/dataSources/
+.idea/**/dataSources.ids
+.idea/**/dataSources.local.xml
+.idea/**/sqlDataSources.xml
+.idea/**/dynamic.xml
+.idea/**/uiDesigner.xml
+.idea/**/dbnavigator.xml
+
+# 忽略模块文件（不强制提交 iml）
+*.iws
+*.iml
+*.ipr
+
+# IDEA 缓存
+out/
+
+######################
+# Java 编译输出
+######################
+*.class
+*.log
+*.ctxt
+hs_err_pid*
+replay_pid*
+
+######################
+# Maven
+######################
+target/
+
+######################
+# Gradle
+######################
+.gradle
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+######################
+# 其他临时目录
+######################
+bin/
+gen/
+dist/
+release/
+tmp/
