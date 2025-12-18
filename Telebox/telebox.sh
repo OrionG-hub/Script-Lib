@@ -1,8 +1,7 @@
 #!/bin/bash
-# TeleBox 多实例管理脚本 (v2.17 目录结构适配版)
-# 核心修复：根据用户提供的目录结构，精准迁移 my_session, plugins, assets, temp
-# 解决：迁移后 Session 丢失导致需要重新登录的问题
-# 包含：智能安装、自动GC、环境检查、彻底卸载
+# TeleBox 多实例管理脚本 (v2.20 卸载优化版)
+# 新增：[卸载管理] 支持卸载单个实例 或 卸载全部
+# 保留：智能安装、自动GC、旧版导入、无损更新
 # 适用于 Debian / Ubuntu (x86/ARM)
 
 set -u
@@ -32,7 +31,6 @@ handle_error() {
     fi
 }
 
-# 延迟执行的环境检查函数
 init_environment_checks() {
     echo -e "${BLUE}>>> [环境准备] 检查系统依赖...${NC}"
     if ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
@@ -84,7 +82,6 @@ module.exports = {
 EOF
 }
 
-# 智能安装兜底策略
 smart_npm_install() {
     echo -e "${CYAN}>>> [依赖安装] 尝试标准模式...${NC}"
     set +e
@@ -102,89 +99,59 @@ smart_npm_install() {
     fi
 }
 
-perform_cleanup() {
-    echo -e "${BLUE}>>> [清理] 删除进程和文件...${NC}"
+# 彻底清理所有内容
+perform_cleanup_all() {
+    echo -e "${BLUE}>>> [清理] 停止进程并删除所有文件...${NC}"
     if command -v pm2 >/dev/null 2>&1; then pm2 delete /telebox/ 2>/dev/null || true; pm2 save >/dev/null 2>&1; fi
     rm -rf "$MANAGER_ROOT" "$LEGACY_APP_DIR" "$HOME/.telebox"* "/tmp/telebox"*
-    echo -e "${GREEN}>>> [清理] 完成！${NC}"
+    echo -e "${GREEN}>>> [清理] 全部完成！${NC}"
+}
+
+# 核心：通用数据迁移逻辑
+handle_data_migration() {
+    local src="$1"
+    local dest="$2"
+    local items=("my_session" "session" "plugins" "assets" "data" "temp" ".env" "config.json" "input.json")
+    echo -e "${CYAN}   - [数据迁移] 扫描并迁移关键数据...${NC}"
+    mkdir -p "$dest"
+    for item in "${items[@]}"; do
+        if [ -e "$src/$item" ]; then echo "     迁移: $item..."; cp -a "$src/$item" "$dest/"; fi
+    done
+    find "$src" -maxdepth 1 -name "*.json" ! -name "package.json" ! -name "package-lock.json" ! -name "tsconfig.json" -exec cp -a {} "$dest/" \; 2>/dev/null || true
 }
 
 # ================= 核心功能模块 =================
 
-# [功能7] 导入旧版 (适配 my_session 和 assets)
 import_legacy() {
     init_environment_checks
-
     if [ ! -d "$LEGACY_APP_DIR" ]; then echo -e "${RED}无旧版目录。${NC}"; return; fi
-    echo -e "${BLUE}==== 导入旧版 (适配 my_session/assets) ====${NC}"
+    echo -e "${BLUE}==== 导入旧版 (数据注入模式) ====${NC}"
     read -p "命名实例 (如 legacy): " input_name
     local inst_name="${input_name:-legacy}"
     if [[ ! "$inst_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then echo -e "${RED}名称非法${NC}"; return; fi
     local target_dir="$INSTANCES_DIR/$inst_name"
     if [ -d "$target_dir" ]; then echo -e "${RED}已存在${NC}"; return; fi
 
-    # 1. 停止旧进程
-    echo -e "${CYAN}>>> [1/6] 停止旧进程...${NC}"
+    echo -e "${CYAN}>>> [1/5] 停止旧进程...${NC}"
     pm2 delete telebox 2>/dev/null || true
     pkill -f "telebox" 2>/dev/null || true
 
-    # 2. 准备新环境
-    echo -e "${CYAN}>>> [2/6] 拉取最新代码...${NC}"
+    echo -e "${CYAN}>>> [2/5] 准备新环境...${NC}"
     mkdir -p "$target_dir"
     git clone "$GITHUB_REPO" "$target_dir"
 
-    # 3. 数据注入 (适配提供的目录结构)
-    echo -e "${CYAN}>>> [3/6] 注入旧版数据...${NC}"
+    echo -e "${CYAN}>>> [3/5] 注入旧数据...${NC}"
+    handle_data_migration "$LEGACY_APP_DIR" "$target_dir"
 
-    # A. 迁移 Session (重点修复)
-    if [ -d "$LEGACY_APP_DIR/my_session" ]; then
-        echo "   - 发现并迁移: my_session (关键数据)"
-        cp -r "$LEGACY_APP_DIR/my_session" "$target_dir/"
-    elif [ -d "$LEGACY_APP_DIR/session" ]; then
-        echo "   - 发现并迁移: session (备用兼容)"
-        cp -r "$LEGACY_APP_DIR/session" "$target_dir/"
-    else
-        echo -e "${YELLOW}   ! 未找到 Session 文件夹，可能需要重新登录${NC}"
-    fi
-
-    # B. 迁移 Plugins (用户插件)
-    if [ -d "$LEGACY_APP_DIR/plugins" ]; then
-        echo "   - 发现并迁移: plugins (用户插件)"
-        cp -r "$LEGACY_APP_DIR/plugins" "$target_dir/"
-    fi
-
-    # C. 迁移 Assets (静态资源)
-    if [ -d "$LEGACY_APP_DIR/assets" ]; then
-        echo "   - 发现并迁移: assets (静态资源)"
-        cp -r "$LEGACY_APP_DIR/assets" "$target_dir/"
-    fi
-
-    # D. 迁移 Temp (临时文件，保留以防万一)
-    if [ -d "$LEGACY_APP_DIR/temp" ]; then
-        echo "   - 发现并迁移: temp (临时文件)"
-        cp -r "$LEGACY_APP_DIR/temp" "$target_dir/"
-    fi
-
-    # E. 迁移 .env
-    if [ -f "$LEGACY_APP_DIR/.env" ]; then
-        echo "   - 发现并迁移: .env (环境配置)"
-        cp "$LEGACY_APP_DIR/.env" "$target_dir/"
-    fi
-
-    # 4. 安装依赖
-    echo -e "${CYAN}>>> [4/6] 安装依赖...${NC}"
+    echo -e "${CYAN}>>> [4/5] 安装依赖...${NC}"
     cd "$target_dir"
     smart_npm_install
 
-    # 5. 启动
-    echo -e "${CYAN}>>> [5/6] 启动服务...${NC}"
+    echo -e "${CYAN}>>> [5/5] 启动服务...${NC}"
     mkdir -p "$target_dir/logs"
     generate_ecosystem "$inst_name" "$target_dir"
-    pm2 start ecosystem.config.js
-    pm2 save
+    pm2 start ecosystem.config.js; pm2 save
 
-    # 6. 备份旧目录
-    echo -e "${CYAN}>>> [6/6] 备份旧目录...${NC}"
     local backup_name="${LEGACY_APP_DIR}_backup_$(date +%s)"
     mv "$LEGACY_APP_DIR" "$backup_name"
     echo -e "${GREEN}✔ 导入成功！旧版已备份为: ${YELLOW}${backup_name}${NC}"
@@ -194,7 +161,7 @@ clean_reinstall_all() {
     echo -e "${RED}==== 全新安装 ====${NC}"
     read -p "确认清除所有数据？(y/N): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi
-    perform_cleanup
+    perform_cleanup_all
     init_environment_checks
     echo -e "${GREEN}>>> 3秒后开始安装...${NC}"
     sleep 3
@@ -254,77 +221,67 @@ update_lossless() {
     done
 }
 
-reinstall_core_lossless() {
-    echo -e "${BLUE}==== 无损重装 (适配目录结构) ====${NC}"
+# [功能5] 卸载管理逻辑
+uninstall_logic() {
+    echo -e "${RED}==== 卸载管理 ====${NC}"
     local instances=$(get_instances)
-    if [ -z "$instances" ]; then echo -e "${YELLOW}无实例。${NC}"; return; fi
-    echo "当前: $instances" | xargs
-    read -p "目标 (all/名称): " target
-    local list_to_process=""
-    if [ "$target" == "all" ]; then list_to_process=$instances; else list_to_process=$target; fi
-    init_environment_checks
-    for inst in $list_to_process; do
-        if [ ! -d "$INSTANCES_DIR/$inst" ]; then continue; fi
-        echo -e "${CYAN}>>> 重装: $inst ...${NC}"
-        local dir="$INSTANCES_DIR/$inst"
 
-        # 定义临时备份目录
-        local tmp_bk="/tmp/tb_bk_$inst"
-        rm -rf "$tmp_bk"
-        mkdir -p "$tmp_bk"
+    if [ -z "$instances" ]; then
+        echo -e "${YELLOW}当前无受管实例。${NC}"
+        read -p "是否彻底清除管理器及残留文件？(y/N): " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then perform_cleanup_all; fi
+        return
+    fi
 
-        if [ -d "$dir" ]; then cd "$dir"; pm2 delete ecosystem.config.js 2>/dev/null || true; fi
+    echo -e "当前实例: ${YELLOW}$(echo $instances | xargs)${NC}"
+    echo -e "1. 输入 ${GREEN}实例名称${NC} 仅卸载该实例 (数据会丢失)"
+    echo -e "2. 输入 ${RED}all${NC} 卸载全部并清除管理器"
+    echo
+    read -p "请输入目标: " target
 
-        # 备份关键数据 (根据提供的结构)
-        echo "   - 备份用户数据..."
-        [ -d "$dir/my_session" ] && cp -r "$dir/my_session" "$tmp_bk/"
-        [ -d "$dir/session" ] && cp -r "$dir/session" "$tmp_bk/"
-        [ -d "$dir/plugins" ] && cp -r "$dir/plugins" "$tmp_bk/"
-        [ -d "$dir/assets" ] && cp -r "$dir/assets" "$tmp_bk/"
-        [ -d "$dir/temp" ] && cp -r "$dir/temp" "$tmp_bk/"
-        [ -f "$dir/.env" ] && cp "$dir/.env" "$tmp_bk/"
+    if [ "$target" == "all" ]; then
+        read -p "确认彻底删除所有内容？(y/N): " confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then perform_cleanup_all; fi
+    else
+        # 检查实例是否存在
+        local dir="$INSTANCES_DIR/$target"
+        if [ ! -d "$dir" ]; then
+            echo -e "${RED}错误：未找到实例 [$target]${NC}"
+            return
+        fi
 
-        cd "$INSTANCES_DIR" || cd "$HOME"
+        echo -e "${BLUE}正在卸载单个实例: $target ...${NC}"
+        # 停止 PM2
+        if [ -f "$dir/ecosystem.config.js" ]; then
+            cd "$dir"
+            pm2 delete ecosystem.config.js 2>/dev/null || true
+            pm2 save >/dev/null 2>&1
+        fi
+        # 删除目录
+        cd "$MANAGER_ROOT" || cd "$HOME"
         rm -rf "$dir"
-        git clone "$GITHUB_REPO" "$dir"
-        cd "$dir"
-        smart_npm_install
-
-        # 还原
-        echo "   - 还原用户数据..."
-        [ -d "$tmp_bk/my_session" ] && rm -rf "$dir/my_session" && mv "$tmp_bk/my_session" "$dir/"
-        [ -d "$tmp_bk/session" ] && rm -rf "$dir/session" && mv "$tmp_bk/session" "$dir/"
-        [ -d "$tmp_bk/plugins" ] && rm -rf "$dir/plugins" && mv "$tmp_bk/plugins" "$dir/"
-        [ -d "$tmp_bk/assets" ] && rm -rf "$dir/assets" && mv "$tmp_bk/assets" "$dir/"
-        [ -d "$tmp_bk/temp" ] && rm -rf "$dir/temp" && mv "$tmp_bk/temp" "$dir/"
-        [ -f "$tmp_bk/.env" ] && mv "$tmp_bk/.env" "$dir/"
-
-        mkdir -p "$dir/logs"
-        generate_ecosystem "$inst" "$dir"
-        pm2 start ecosystem.config.js; pm2 save
-        echo -e "${GREEN}✔ 重装完成${NC}"
-    done
+        echo -e "${GREEN}✔ 实例 $target 已卸载${NC}"
+    fi
 }
 
 memory_gc_info() { echo -e "${BLUE}==== 内存状态 ====${NC}"; if command -v pm2 >/dev/null 2>&1; then pm2 list | grep -iE "telebox|App name|id"; else echo "PM2 未运行"; fi; }
-uninstall_all() { echo -e "${RED}==== 卸载全部 ====${NC}"; read -p "确认删除所有？(y/N): " confirm; if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi; perform_cleanup; }
+
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.17)        #${NC}"
+    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.20)        #${NC}"
     echo -e "${BLUE}#############################################${NC}"
     echo -e "1. 全新安装 (清理+新建)"
     echo -e "2. 添加实例"
-    echo -e "3. 无损更新"
-    echo -e "4. 无损重装 (保留 my_session/plugins/assets)"
-    echo -e "5. 内存状态"
-    echo -e "6. 卸载全部"
-    if [ -d "$LEGACY_APP_DIR" ]; then echo -e "${YELLOW}7. 导入旧版 (数据注入模式)${NC}"; fi
+    echo -e "3. 无损更新 (仅更新代码和依赖)"
+    echo -e "4. 查看内存状态"
+    echo -e "5. 卸载管理 (单个/全部)"
+    if [ -d "$LEGACY_APP_DIR" ]; then echo -e "${YELLOW}6. 导入旧版 (数据注入模式)${NC}"; fi
     echo -e "0. 退出"
     echo -e "${BLUE}#############################################${NC}"
     echo -e "当前实例: ${YELLOW}$(get_instances | xargs)${NC}"
     echo
 }
 
-main() { while true; do show_menu; read -p "请选择: " choice; echo; case $choice in 1) clean_reinstall_all;; 2) add_new_instance;; 3) update_lossless;; 4) reinstall_core_lossless;; 5) memory_gc_info;; 6) uninstall_all;; 7) import_legacy;; 0) exit 0;; *) echo "无效";; esac; [ "$choice" != "0" ] && read -p "回车继续..."; done; }
+main() { while true; do show_menu; read -p "请选择: " choice; echo; case $choice in 1) clean_reinstall_all;; 2) add_new_instance;; 3) update_lossless;; 4) memory_gc_info;; 5) uninstall_logic;; 6) import_legacy;; 0) exit 0;; *) echo "无效";; esac; [ "$choice" != "0" ] && read -p "回车继续..."; done; }
 main
