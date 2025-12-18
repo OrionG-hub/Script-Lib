@@ -6,7 +6,7 @@ This repository is a collection of automation scripts I maintain, designed to st
 
 Below are some of the practical scripts currently included in the library:
 
-* **Homebrew Smart Upgrade Script (`brew-upgrade-manager.sh`)**:
+* **Homebrew Smart Upgrade Script ([brew-upgrade-manager.sh](Homebrew/brew-upgrade-manager.sh))**:
     A powerful Homebrew command-line tool for intelligent upgrades, health checks, and system cleanup.
 
 ## 🛠️ Dependencies
