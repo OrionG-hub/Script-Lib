@@ -1,9 +1,9 @@
 #!/bin/bash
-# TeleBox 多实例管理脚本 (v2.10)
-# 修复：[无损重装] 彻底解决了 "Unable to read current working directory" 报错
-# 原理：在删除旧目录前，强制脚本跳转到上级目录
-# 包含：智能命名、自动GC、旧版导入、彻底清理等所有功能
-# 适用于 Debian / Ubuntu
+# TeleBox 多实例管理脚本 (v2.11 编译修复版)
+# 修复：[无损重装/安装] 解决 npm install 报错 "make: g++: No such file or directory"
+# 原理：强制检查并安装 g++、make 等编译工具链
+# 包含：之前所有功能 (智能命名、自动GC、分支修复、目录修复、旧版导入)
+# 适用于 Debian / Ubuntu (x86/ARM)
 
 set -u
 
@@ -35,6 +35,7 @@ handle_error() {
 }
 
 check_dependencies() {
+    # 1. 基础环境检查
     if ! command -v node >/dev/null 2>&1; then
         echo -e "${YELLOW}>>> [环境检查] 正在安装 Node.js ...${NC}"
         sudo apt-get update
@@ -47,6 +48,16 @@ check_dependencies() {
         echo -e "${YELLOW}>>> [环境检查] 正在安装 PM2 ...${NC}"
         sudo npm install -g pm2
     fi
+
+    # 2. [核心修复] 编译工具链检查 (修复 g++ missing 问题)
+    # bufferutil 等原生模块需要 g++ 和 make 才能编译
+    if ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
+        echo -e "${YELLOW}>>> [环境补全] 检测到缺失编译工具，正在安装 g++ 和 make ...${NC}"
+        sudo apt-get update
+        # 显式安装编译所需的所有工具
+        sudo apt-get install -y build-essential g++ make python3
+    fi
+
     mkdir -p "$INSTANCES_DIR"
 }
 
@@ -62,7 +73,6 @@ generate_ecosystem() {
     local dir="$2"
     local final_pm2_name="$input_name"
 
-    # 智能命名逻辑
     if [[ "$input_name" != telebox* ]] && [[ "$input_name" != TeleBox* ]]; then
         final_pm2_name="telebox_${input_name}"
     fi
@@ -141,6 +151,7 @@ import_legacy() {
 
     echo -e "${CYAN}>>> [3/4] 升级环境...${NC}"
     cd "$target_dir"
+    # 这里也会触发编译，所以前面 check_dependencies 很重要
     npm install --prefer-offline --no-audit
 
     echo -e "${CYAN}>>> [4/4] 接管配置 (应用内存优化)...${NC}"
@@ -252,7 +263,7 @@ update_lossless() {
     done
 }
 
-# [功能4] 无损重装 (核心修复)
+# [功能4] 无损重装 (含环境检查)
 reinstall_core_lossless() {
     echo -e "${BLUE}==== 无损重装 (核心) ====${NC}"
     local instances=$(get_instances)
@@ -284,20 +295,18 @@ reinstall_core_lossless() {
         rm -rf "$temp_session"
         [ -d "$dir/session" ] && cp -r "$dir/session" "$temp_session"
 
-        # [核心修复点]
-        # 在删除目录前，强制切换到上级目录
-        # 避免 "Unable to read current working directory" 错误
+        # 跳出目录
         cd "$INSTANCES_DIR" || cd "$HOME"
 
         echo "   - 删除旧文件..."
         rm -rf "$dir"
 
         echo "   - 重新下载..."
-        # 这里的 $dir 已经是绝对路径了，且目录已清空
         git clone "$GITHUB_REPO" "$dir"
 
         echo "   - 安装依赖..."
-        cd "$dir" # 下载完后再次进入
+        cd "$dir"
+        # 如果这里报错，说明环境还是缺东西，但 check_dependencies 应该已经处理了
         npm install --prefer-offline --no-audit
 
         echo "   - 还原 Session..."
@@ -335,7 +344,7 @@ uninstall_all() {
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.10)        #${NC}"
+    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.11)        #${NC}"
     echo -e "${BLUE}#############################################${NC}"
     echo -e "1. 全新安装 (彻底清理并新建)"
     echo -e "2. 添加新实例"
