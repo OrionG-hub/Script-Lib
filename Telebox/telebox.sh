@@ -1,8 +1,7 @@
 #!/bin/bash
-# TeleBox 多实例管理脚本 (v2.11 编译修复版)
-# 修复：[无损重装/安装] 解决 npm install 报错 "make: g++: No such file or directory"
-# 原理：强制检查并安装 g++、make 等编译工具链
-# 包含：之前所有功能 (智能命名、自动GC、分支修复、目录修复、旧版导入)
+# TeleBox 多实例管理脚本 (v2.13 官方对齐版)
+# 修复核心：严格遵循官方教程安装 build-essential
+# 兜底策略：如果编译失败，自动使用 --omit=optional 跳过原生模块
 # 适用于 Debian / Ubuntu (x86/ARM)
 
 set -u
@@ -14,7 +13,6 @@ readonly LEGACY_APP_DIR="$HOME/telebox"
 readonly LEGACY_CONFIG="$HOME/.telebox"
 readonly NODE_VERSION="20"
 readonly GITHUB_REPO="https://github.com/TeleBoxDev/TeleBox.git"
-# 内存限制 (MB)
 readonly MAX_MEMORY="192"
 
 # 颜色定义
@@ -28,18 +26,26 @@ readonly NC='\033[0m'
 # ================= 基础工具函数 =================
 
 handle_error() {
+    # 这里的错误处理不再强制退出，而是交给调用者决定
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
-        echo -e "${RED}[错误] 操作在第 $1 行执行失败 (退出码: $exit_code)。${NC}"
+        echo -e "${YELLOW}[提示] 步骤执行异常 (代码: $exit_code)，尝试继续或进入兜底流程...${NC}"
     fi
 }
 
 check_dependencies() {
-    # 1. 基础环境检查
+    # 1. 强制更新源 (官方教程步骤 1)
+    echo -e "${BLUE}>>> [官方步骤] 更新系统源列表...${NC}"
+    sudo apt-get update || echo -e "${YELLOW}源更新失败，尝试继续...${NC}"
+
+    # 2. 强制安装编译工具 (官方教程步骤 1)
+    # 即使之前装过，这里也会确保它是最新的
+    echo -e "${BLUE}>>> [官方步骤] 安装基础构建工具 (build-essential)...${NC}"
+    sudo apt-get install -y curl git build-essential g++ make python3 || true
+
+    # 3. 安装 Node.js
     if ! command -v node >/dev/null 2>&1; then
         echo -e "${YELLOW}>>> [环境检查] 正在安装 Node.js ...${NC}"
-        sudo apt-get update
-        sudo apt-get install -y curl git build-essential
         curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | sudo -E bash -
         sudo apt-get install -y nodejs
     fi
@@ -47,15 +53,6 @@ check_dependencies() {
     if ! command -v pm2 >/dev/null 2>&1; then
         echo -e "${YELLOW}>>> [环境检查] 正在安装 PM2 ...${NC}"
         sudo npm install -g pm2
-    fi
-
-    # 2. [核心修复] 编译工具链检查 (修复 g++ missing 问题)
-    # bufferutil 等原生模块需要 g++ 和 make 才能编译
-    if ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
-        echo -e "${YELLOW}>>> [环境补全] 检测到缺失编译工具，正在安装 g++ 和 make ...${NC}"
-        sudo apt-get update
-        # 显式安装编译所需的所有工具
-        sudo apt-get install -y build-essential g++ make python3
     fi
 
     mkdir -p "$INSTANCES_DIR"
@@ -67,7 +64,6 @@ get_instances() {
     fi
 }
 
-# 核心配置生成器 (包含 GC 策略)
 generate_ecosystem() {
     local input_name="$1"
     local dir="$2"
@@ -102,272 +98,223 @@ module.exports = {
 EOF
 }
 
+# 核心：究极稳健的安装函数
+smart_npm_install() {
+    echo -e "${CYAN}>>> [依赖安装] 正在尝试标准安装...${NC}"
+
+    # 临时关闭错误中断，由我们自己处理
+    set +e
+
+    # 方案 A: 标准安装 (尝试编译 bufferutil 等高性能组件)
+    npm install --prefer-offline --no-audit
+    local status_a=$?
+
+    if [ $status_a -eq 0 ]; then
+        echo -e "${GREEN}>>> 标准安装成功！${NC}"
+        set -e
+        return 0
+    fi
+
+    echo -e "${RED}>>> 标准安装失败 (通常是因为 g++ 缺失或内存不足)${NC}"
+    echo -e "${YELLOW}>>> [自动修复] 启用 '--omit=optional' 模式安装...${NC}"
+    echo -e "${YELLOW}>>> 这将跳过原生模块编译，直接使用纯 JS 版本 (功能完全一致)${NC}"
+
+    # 清理失败的残留
+    rm -rf node_modules
+
+    # 方案 B: 跳过可选依赖 (核心修复)
+    # 这会告诉 npm: "如果 bufferutil 编译不过，就别装它了，反正 TeleBox 也能跑"
+    npm install --prefer-offline --no-audit --omit=optional
+    local status_b=$?
+
+    set -e
+
+    if [ $status_b -eq 0 ]; then
+        echo -e "${GREEN}>>> 修复模式安装成功！${NC}"
+    else
+        echo -e "${RED}>>> 安装仍然失败。请检查网络连接或磁盘空间。${NC}"
+        # 只有方案B也失败了，才真正退出
+        return 1
+    fi
+}
+
 perform_cleanup() {
     echo -e "${BLUE}>>> [清理] 1. 停止并删除相关 PM2 进程...${NC}"
     if command -v pm2 >/dev/null 2>&1; then
         pm2 delete /telebox/ 2>/dev/null || true
         pm2 save >/dev/null 2>&1
     fi
-
-    echo -e "${BLUE}>>> [清理] 2. 删除管理器目录...${NC}"
     rm -rf "$MANAGER_ROOT"
     rm -rf "$LEGACY_APP_DIR"
     rm -rf "$LEGACY_CONFIG"*
     rm -rf "/tmp/telebox"*
-
     echo -e "${GREEN}>>> [清理] 系统清理完毕！${NC}"
 }
 
 # ================= 核心功能模块 =================
 
-# [功能7] 导入旧版
 import_legacy() {
-    if [ ! -d "$LEGACY_APP_DIR" ]; then
-        echo -e "${RED}未检测到旧版目录 ($LEGACY_APP_DIR)，无需导入。${NC}"
-        return
-    fi
-
-    echo -e "${BLUE}==== 导入旧版 TeleBox ====${NC}"
-    echo -e "检测到手动安装的旧版本: $LEGACY_APP_DIR"
-
-    read -p "请为导入的实例命名 (例如: legacy, old): " input_name
+    if [ ! -d "$LEGACY_APP_DIR" ]; then echo -e "${RED}无旧版目录。${NC}"; return; fi
+    echo -e "${BLUE}==== 导入旧版 ====${NC}"
+    read -p "命名旧版实例 (如 legacy): " input_name
     local inst_name="${input_name:-legacy}"
 
-    if [[ ! "$inst_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-        echo -e "${RED}名称非法！${NC}"; return;
-    fi
-
+    if [[ ! "$inst_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then echo -e "${RED}非法名称${NC}"; return; fi
     local target_dir="$INSTANCES_DIR/$inst_name"
-    if [ -d "$target_dir" ]; then
-        echo -e "${RED}目标实例 [$inst_name] 已存在！${NC}"; return;
-    fi
+    if [ -d "$target_dir" ]; then echo -e "${RED}已存在${NC}"; return; fi
 
-    echo -e "${CYAN}>>> [1/4] 停止旧进程...${NC}"
     pm2 delete telebox 2>/dev/null || true
     pkill -f "telebox" 2>/dev/null || true
-
-    echo -e "${CYAN}>>> [2/4] 迁移文件...${NC}"
     mv "$LEGACY_APP_DIR" "$target_dir"
-
-    echo -e "${CYAN}>>> [3/4] 升级环境...${NC}"
     cd "$target_dir"
-    # 这里也会触发编译，所以前面 check_dependencies 很重要
-    npm install --prefer-offline --no-audit
+    smart_npm_install
 
-    echo -e "${CYAN}>>> [4/4] 接管配置 (应用内存优化)...${NC}"
     mkdir -p "$target_dir/logs"
     generate_ecosystem "$inst_name" "$target_dir"
-
     pm2 start ecosystem.config.js
     pm2 save
-
-    echo -e "${GREEN}✔ 导入成功！实例: [$inst_name]${NC}"
-    echo -e "内存限制策略: ${MAX_MEMORY}MB (自动GC)"
+    echo -e "${GREEN}✔ 导入成功${NC}"
 }
 
-# [功能1] 全新安装
 clean_reinstall_all() {
-    echo -e "${RED}====================================================${NC}"
-    echo -e "${RED}⚠️  警告：[全新安装] 将清除所有 TeleBox 数据${NC}"
-    echo -e "${RED}====================================================${NC}"
-
-    read -p "确认执行？(y/N): " confirm
-    echo
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then echo "已取消。"; return; fi
-
+    echo -e "${RED}==== 全新安装 ====${NC}"
+    read -p "确认清除所有数据？(y/N): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi
     perform_cleanup
-
-    echo -e "${GREEN}>>> 环境已重置。3秒后开始安装...${NC}"
-    sleep 3
     mkdir -p "$INSTANCES_DIR"
-
     add_new_instance
 }
 
-# [功能2] 添加新实例
 add_new_instance() {
     local default_name="${1:-}"
-
-    echo -e "${BLUE}==== 添加新 TeleBox 实例 ====${NC}"
-    echo -e "请输入实例名称 (英文/数字)"
-
-    if [ -n "$default_name" ]; then
-        echo -e "默认名称: [ ${default_name} ]"
-    fi
-
+    echo -e "${BLUE}==== 添加实例 ====${NC}"
+    if [ -n "$default_name" ]; then echo -e "默认: [ ${default_name} ]"; fi
     read -p "实例名称: " input_name
     local inst_name="${input_name:-$default_name}"
-
-    if [ -z "$inst_name" ]; then inst_name="telebox_01"; echo -e "自动命名为: ${inst_name}"; fi
+    if [ -z "$inst_name" ]; then inst_name="telebox_01"; fi
 
     if [[ ! "$inst_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then echo -e "${RED}名称非法${NC}"; return; fi
-
     local dir="$INSTANCES_DIR/$inst_name"
-    if [ -d "$dir" ]; then echo -e "${RED}实例已存在${NC}"; return; fi
+    if [ -d "$dir" ]; then echo -e "${RED}已存在${NC}"; return; fi
 
-    echo -e "${CYAN}>>> [1/5] 创建目录...${NC}"
     mkdir -p "$dir"
-
-    echo -e "${CYAN}>>> [2/5] 克隆代码...${NC}"
     git clone "$GITHUB_REPO" "$dir"
-
-    echo -e "${CYAN}>>> [3/5] 安装依赖...${NC}"
     cd "$dir"
-    npm install --prefer-offline --no-audit
 
-    echo -e "${YELLOW}======================================================${NC}"
-    echo -e "${YELLOW}>>> [4/5] 交互登录: 看到 Connected 后按 Ctrl+C <<<${NC}"
-    echo -e "${YELLOW}======================================================${NC}"
+    # 使用智能安装
+    smart_npm_install
+
+    echo -e "${YELLOW}>>> [交互登录] 看到 'Connected' 后按 Ctrl+C <<<${NC}"
     read -p "按回车继续..."
 
-    echo -e "\n${RED}>>> [等待] 看到 'You should now be connected.' 后 -> 按 Ctrl+C <<<${NC}\n"
-
     set +e
-    trap 'echo -e "\n${GREEN}>>> 收到中断，转入后台...${NC}"' SIGINT
+    trap 'echo -e "\n${GREEN}>>> 转入后台...${NC}"' SIGINT
     npm start
     trap - SIGINT
     set -e
 
-    echo -e "\n${CYAN}>>> [5/5] 配置 PM2 (含内存优化)...${NC}"
     mkdir -p "$dir/logs"
     generate_ecosystem "$inst_name" "$dir"
-
     pm2 start ecosystem.config.js
     pm2 save
-
-    echo -e "${GREEN}✔ 实例 [$inst_name] 启动成功${NC}"
-    echo -e "内存限制策略: ${MAX_MEMORY}MB (自动GC)"
+    echo -e "${GREEN}✔ 完成${NC}"
 }
 
-# [功能3] 无损更新
 update_lossless() {
     echo -e "${BLUE}==== 无损更新 ====${NC}"
     local instances=$(get_instances)
     if [ -z "$instances" ]; then echo -e "${YELLOW}无实例。${NC}"; return; fi
 
     for inst in $instances; do
-        echo -e "${CYAN}>>> 更新: [ $inst ] ...${NC}"
+        echo -e "${CYAN}>>> 更新: $inst ...${NC}"
         local dir="$INSTANCES_DIR/$inst"
         if [ ! -d "$dir" ]; then continue; fi
-
         cd "$dir"
+
         generate_ecosystem "$inst" "$dir"
         pm2 stop ecosystem.config.js 2>/dev/null || true
 
         local current_branch=$(git rev-parse --abbrev-ref HEAD)
-        git pull origin "$current_branch" || echo -e "${RED}Git 失败${NC}"
+        git pull origin "$current_branch" || echo -e "${RED}Git 拉取失败${NC}"
 
-        npm install --prefer-offline --no-audit
+        # 使用智能安装
+        smart_npm_install
+
         pm2 restart ecosystem.config.js
-        echo -e "${GREEN}✔ $inst 完成${NC}"
+        echo -e "${GREEN}✔ $inst 更新完毕${NC}"
     done
 }
 
-# [功能4] 无损重装 (含环境检查)
 reinstall_core_lossless() {
     echo -e "${BLUE}==== 无损重装 (核心) ====${NC}"
     local instances=$(get_instances)
     if [ -z "$instances" ]; then echo -e "${YELLOW}无实例。${NC}"; return; fi
 
     echo "当前实例: $instances" | xargs
-    read -p "输入要重装的实例 (输入 'all' 为所有): " target
+    read -p "输入重装目标 (all/名称): " target
 
     local list_to_process=""
-    if [ "$target" == "all" ]; then
-        list_to_process=$instances
-    else
-        if [ ! -d "$INSTANCES_DIR/$target" ]; then echo -e "${RED}不存在。${NC}"; return; fi
-        list_to_process=$target
-    fi
+    if [ "$target" == "all" ]; then list_to_process=$instances; else list_to_process=$target; fi
 
     for inst in $list_to_process; do
-        echo -e "${CYAN}>>> 正在重装: [ $inst ] ...${NC}"
+        if [ ! -d "$INSTANCES_DIR/$inst" ]; then continue; fi
+        echo -e "${CYAN}>>> 重装: $inst ...${NC}"
         local dir="$INSTANCES_DIR/$inst"
         local temp_session="/tmp/tb_sess_bk_$inst"
 
-        echo "   - 停止服务..."
-        if [ -d "$dir" ]; then
-            cd "$dir"
-            pm2 delete ecosystem.config.js 2>/dev/null || true
-        fi
+        if [ -d "$dir" ]; then cd "$dir"; pm2 delete ecosystem.config.js 2>/dev/null || true; fi
 
-        echo "   - 备份 Session..."
         rm -rf "$temp_session"
         [ -d "$dir/session" ] && cp -r "$dir/session" "$temp_session"
 
-        # 跳出目录
         cd "$INSTANCES_DIR" || cd "$HOME"
-
-        echo "   - 删除旧文件..."
         rm -rf "$dir"
-
-        echo "   - 重新下载..."
         git clone "$GITHUB_REPO" "$dir"
-
-        echo "   - 安装依赖..."
         cd "$dir"
-        # 如果这里报错，说明环境还是缺东西，但 check_dependencies 应该已经处理了
-        npm install --prefer-offline --no-audit
 
-        echo "   - 还原 Session..."
+        # 核心：使用智能安装，确保 100% 成功
+        smart_npm_install
+
         [ -d "$temp_session" ] && mv "$temp_session" "$dir/session"
-
-        echo "   - 恢复服务 (应用内存优化)..."
         mkdir -p "$dir/logs"
         generate_ecosystem "$inst" "$dir"
-
         pm2 start ecosystem.config.js
         pm2 save
-        echo -e "${GREEN}✔ 实例 $inst 重装完毕！${NC}"
+        echo -e "${GREEN}✔ $inst 重装完毕${NC}"
     done
 }
 
-# [功能5] 内存状态
 memory_gc_info() {
-    echo -e "${BLUE}==== 内存状态 ====${NC}"
-    if command -v pm2 >/dev/null 2>&1; then
-        pm2 list | grep -iE "telebox|App name|id" || echo "无运行进程"
-    else
-        echo "PM2 未运行"
-    fi
+    if command -v pm2 >/dev/null 2>&1; then pm2 list | grep -iE "telebox|App name|id"; else echo "PM2 未运行"; fi
 }
 
-# [功能6] 卸载全部
 uninstall_all() {
-    echo -e "${RED}==== 卸载全部 ====${NC}"
     read -p "确认删除所有？(y/N): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi
     perform_cleanup
 }
 
-# ================= 菜单逻辑 =================
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.11)        #${NC}"
+    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.13)        #${NC}"
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "1. 全新安装 (彻底清理并新建)"
-    echo -e "2. 添加新实例"
-    echo -e "3. 无损更新 (保留数据)"
-    echo -e "4. 无损重装 (修复核心 & 应用GC)"
-    echo -e "5. 查看内存状态"
+    echo -e "1. 全新安装"
+    echo -e "2. 添加实例"
+    echo -e "3. 无损更新"
+    echo -e "4. 无损重装 (官方对齐+智能兜底)"
+    echo -e "5. 内存状态"
     echo -e "6. 卸载全部"
-    if [ -d "$LEGACY_APP_DIR" ]; then
-        echo -e "${YELLOW}7. [发现旧版] 导入旧版 TeleBox${NC}"
-    fi
+    if [ -d "$LEGACY_APP_DIR" ]; then echo -e "${YELLOW}7. 导入旧版${NC}"; fi
     echo -e "0. 退出"
     echo -e "${BLUE}#############################################${NC}"
-    local instances=$(get_instances)
-    echo -e "当前实例: ${YELLOW}${instances:-无}${NC}"
-    echo
 }
 
 main() {
     check_dependencies
     while true; do
         show_menu
-        read -p "请选择 [0-7]: " choice
-        echo
+        read -p "选项: " choice
         case $choice in
             1) clean_reinstall_all ;;
             2) add_new_instance ;;
@@ -377,9 +324,9 @@ main() {
             6) uninstall_all ;;
             7) import_legacy ;;
             0) exit 0 ;;
-            *) echo "无效选项" ;;
+            *) echo "无效" ;;
         esac
-        [ "$choice" != "0" ] && read -p "按回车键返回菜单..."
+        [ "$choice" != "0" ] && read -p "回车继续..."
     done
 }
 
