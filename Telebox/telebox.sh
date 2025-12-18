@@ -1,7 +1,8 @@
 #!/bin/bash
-# TeleBox 多实例管理脚本 (v2.15)
-# 逻辑确认：启动时绝不运行 apt update，秒进菜单
-# 只有在选择 1/2/3/4/7 时才触发环境检查
+# TeleBox 多实例管理脚本 (v2.17 目录结构适配版)
+# 核心修复：根据用户提供的目录结构，精准迁移 my_session, plugins, assets, temp
+# 解决：迁移后 Session 丢失导致需要重新登录的问题
+# 包含：智能安装、自动GC、环境检查、彻底卸载
 # 适用于 Debian / Ubuntu (x86/ARM)
 
 set -u
@@ -10,7 +11,6 @@ set -u
 readonly MANAGER_ROOT="$HOME/telebox_manager"
 readonly INSTANCES_DIR="$MANAGER_ROOT/instances"
 readonly LEGACY_APP_DIR="$HOME/telebox"
-readonly LEGACY_CONFIG="$HOME/.telebox"
 readonly NODE_VERSION="20"
 readonly GITHUB_REPO="https://github.com/TeleBoxDev/TeleBox.git"
 readonly MAX_MEMORY="192"
@@ -28,162 +28,181 @@ readonly NC='\033[0m'
 handle_error() {
     local exit_code=$?
     if [ $exit_code -ne 0 ]; then
-        echo -e "${YELLOW}[提示] 步骤执行异常 (代码: $exit_code)，尝试智能修复...${NC}"
+        echo -e "${YELLOW}[提示] 步骤异常 (代码: $exit_code)，尝试继续...${NC}"
     fi
 }
 
 # 延迟执行的环境检查函数
 init_environment_checks() {
-    echo -e "${BLUE}>>> [环境准备] 正在检查并配置系统依赖...${NC}"
-
-    # 1. 基础构建工具 (只在缺失时安装)
+    echo -e "${BLUE}>>> [环境准备] 检查系统依赖...${NC}"
     if ! command -v g++ >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1 || ! command -v git >/dev/null 2>&1; then
-        echo -e "${YELLOW}>>> [环境补全] 缺少编译工具，正在安装...${NC}"
-        # 只有这里才会跑 apt update
+        echo -e "${YELLOW}>>> [环境补全] 安装编译工具...${NC}"
         sudo apt-get update || true
         sudo apt-get install -y curl git build-essential g++ make python3 python-is-python3 || true
     fi
-
-    # 2. Node.js
     if ! command -v node >/dev/null 2>&1; then
         echo -e "${YELLOW}>>> [环境补全] 安装 Node.js ${NODE_VERSION}...${NC}"
         curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | sudo -E bash -
         sudo apt-get install -y nodejs
     fi
-
-    # 3. PM2
     if ! command -v pm2 >/dev/null 2>&1; then
         echo -e "${YELLOW}>>> [环境补全] 安装 PM2...${NC}"
         sudo npm install -g pm2
     fi
-
     mkdir -p "$INSTANCES_DIR"
     echo -e "${GREEN}>>> [环境准备] 就绪！${NC}"
     echo
 }
 
 get_instances() {
-    if [ -d "$INSTANCES_DIR" ]; then
-        ls -1 "$INSTANCES_DIR" 2>/dev/null
-    fi
+    if [ -d "$INSTANCES_DIR" ]; then ls -1 "$INSTANCES_DIR" 2>/dev/null; fi
 }
 
 generate_ecosystem() {
     local input_name="$1"
     local dir="$2"
     local final_pm2_name="$input_name"
-
-    if [[ "$input_name" != telebox* ]] && [[ "$input_name" != TeleBox* ]]; then
-        final_pm2_name="telebox_${input_name}"
-    fi
-
+    if [[ "$input_name" != telebox* ]] && [[ "$input_name" != TeleBox* ]]; then final_pm2_name="telebox_${input_name}"; fi
     cat > "$dir/ecosystem.config.js" <<EOF
 module.exports = {
-  apps: [
-    {
-      name: "${final_pm2_name}",
-      script: "npm",
-      args: "start",
-      cwd: "${dir}",
-      error_file: "${dir}/logs/error.log",
-      out_file: "${dir}/logs/out.log",
-      merge_logs: true,
-      time: true,
-      autorestart: true,
-      max_restarts: 10,
-      restart_delay: 4000,
-      node_args: "--optimize_for_size --max-old-space-size=${MAX_MEMORY} --expose-gc",
-      env: {
-        NODE_ENV: "production"
-      }
-    }
-  ]
+  apps: [{
+    name: "${final_pm2_name}",
+    script: "npm",
+    args: "start",
+    cwd: "${dir}",
+    error_file: "${dir}/logs/error.log",
+    out_file: "${dir}/logs/out.log",
+    merge_logs: true,
+    time: true,
+    autorestart: true,
+    max_restarts: 10,
+    restart_delay: 4000,
+    node_args: "--optimize_for_size --max-old-space-size=${MAX_MEMORY} --expose-gc",
+    env: { NODE_ENV: "production" }
+  }]
 }
 EOF
 }
 
 # 智能安装兜底策略
 smart_npm_install() {
-    echo -e "${CYAN}>>> [依赖安装] 尝试标准模式 (含原生组件)...${NC}"
+    echo -e "${CYAN}>>> [依赖安装] 尝试标准模式...${NC}"
     set +e
     npm install --prefer-offline --no-audit
-    local status_a=$?
-
-    if [ $status_a -eq 0 ]; then
-        echo -e "${GREEN}>>> 标准安装成功！${NC}"
-        set -e
-        return 0
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}>>> 标准安装成功！${NC}"; set -e; return 0;
     fi
-
-    echo -e "${RED}>>> 标准安装失败 (编译环境异常)${NC}"
-    echo -e "${YELLOW}>>> [智能修复] 切换至兼容模式 (跳过编译)...${NC}"
-
+    echo -e "${RED}>>> 标准安装失败，切换兼容模式 (跳过编译)...${NC}"
     rm -rf node_modules
     npm install --prefer-offline --no-audit --omit=optional
-    local status_b=$?
-
-    set -e
-    if [ $status_b -eq 0 ]; then
-        echo -e "${GREEN}>>> 兼容模式安装成功！${NC}"
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}>>> 兼容模式安装成功！${NC}"; set -e;
     else
-        echo -e "${RED}>>> 安装失败，请检查网络。${NC}"
-        return 1
+        echo -e "${RED}>>> 安装失败，请检查网络。${NC}"; return 1;
     fi
 }
 
 perform_cleanup() {
-    echo -e "${BLUE}>>> [清理] 停止进程并删除文件...${NC}"
-    if command -v pm2 >/dev/null 2>&1; then
-        pm2 delete /telebox/ 2>/dev/null || true
-        pm2 save >/dev/null 2>&1
-    fi
-    rm -rf "$MANAGER_ROOT"
-    rm -rf "$LEGACY_APP_DIR"
-    rm -rf "$LEGACY_CONFIG"*
-    rm -rf "/tmp/telebox"*
+    echo -e "${BLUE}>>> [清理] 删除进程和文件...${NC}"
+    if command -v pm2 >/dev/null 2>&1; then pm2 delete /telebox/ 2>/dev/null || true; pm2 save >/dev/null 2>&1; fi
+    rm -rf "$MANAGER_ROOT" "$LEGACY_APP_DIR" "$HOME/.telebox"* "/tmp/telebox"*
     echo -e "${GREEN}>>> [清理] 完成！${NC}"
 }
 
-# ================= 功能入口 =================
+# ================= 核心功能模块 =================
 
+# [功能7] 导入旧版 (适配 my_session 和 assets)
 import_legacy() {
-    init_environment_checks # 按需加载
+    init_environment_checks
 
     if [ ! -d "$LEGACY_APP_DIR" ]; then echo -e "${RED}无旧版目录。${NC}"; return; fi
-    echo -e "${BLUE}==== 导入旧版 ====${NC}"
+    echo -e "${BLUE}==== 导入旧版 (适配 my_session/assets) ====${NC}"
     read -p "命名实例 (如 legacy): " input_name
     local inst_name="${input_name:-legacy}"
     if [[ ! "$inst_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then echo -e "${RED}名称非法${NC}"; return; fi
     local target_dir="$INSTANCES_DIR/$inst_name"
     if [ -d "$target_dir" ]; then echo -e "${RED}已存在${NC}"; return; fi
 
+    # 1. 停止旧进程
+    echo -e "${CYAN}>>> [1/6] 停止旧进程...${NC}"
     pm2 delete telebox 2>/dev/null || true
     pkill -f "telebox" 2>/dev/null || true
-    mv "$LEGACY_APP_DIR" "$target_dir"
+
+    # 2. 准备新环境
+    echo -e "${CYAN}>>> [2/6] 拉取最新代码...${NC}"
+    mkdir -p "$target_dir"
+    git clone "$GITHUB_REPO" "$target_dir"
+
+    # 3. 数据注入 (适配提供的目录结构)
+    echo -e "${CYAN}>>> [3/6] 注入旧版数据...${NC}"
+
+    # A. 迁移 Session (重点修复)
+    if [ -d "$LEGACY_APP_DIR/my_session" ]; then
+        echo "   - 发现并迁移: my_session (关键数据)"
+        cp -r "$LEGACY_APP_DIR/my_session" "$target_dir/"
+    elif [ -d "$LEGACY_APP_DIR/session" ]; then
+        echo "   - 发现并迁移: session (备用兼容)"
+        cp -r "$LEGACY_APP_DIR/session" "$target_dir/"
+    else
+        echo -e "${YELLOW}   ! 未找到 Session 文件夹，可能需要重新登录${NC}"
+    fi
+
+    # B. 迁移 Plugins (用户插件)
+    if [ -d "$LEGACY_APP_DIR/plugins" ]; then
+        echo "   - 发现并迁移: plugins (用户插件)"
+        cp -r "$LEGACY_APP_DIR/plugins" "$target_dir/"
+    fi
+
+    # C. 迁移 Assets (静态资源)
+    if [ -d "$LEGACY_APP_DIR/assets" ]; then
+        echo "   - 发现并迁移: assets (静态资源)"
+        cp -r "$LEGACY_APP_DIR/assets" "$target_dir/"
+    fi
+
+    # D. 迁移 Temp (临时文件，保留以防万一)
+    if [ -d "$LEGACY_APP_DIR/temp" ]; then
+        echo "   - 发现并迁移: temp (临时文件)"
+        cp -r "$LEGACY_APP_DIR/temp" "$target_dir/"
+    fi
+
+    # E. 迁移 .env
+    if [ -f "$LEGACY_APP_DIR/.env" ]; then
+        echo "   - 发现并迁移: .env (环境配置)"
+        cp "$LEGACY_APP_DIR/.env" "$target_dir/"
+    fi
+
+    # 4. 安装依赖
+    echo -e "${CYAN}>>> [4/6] 安装依赖...${NC}"
     cd "$target_dir"
     smart_npm_install
+
+    # 5. 启动
+    echo -e "${CYAN}>>> [5/6] 启动服务...${NC}"
     mkdir -p "$target_dir/logs"
     generate_ecosystem "$inst_name" "$target_dir"
     pm2 start ecosystem.config.js
     pm2 save
-    echo -e "${GREEN}✔ 导入成功${NC}"
+
+    # 6. 备份旧目录
+    echo -e "${CYAN}>>> [6/6] 备份旧目录...${NC}"
+    local backup_name="${LEGACY_APP_DIR}_backup_$(date +%s)"
+    mv "$LEGACY_APP_DIR" "$backup_name"
+    echo -e "${GREEN}✔ 导入成功！旧版已备份为: ${YELLOW}${backup_name}${NC}"
 }
 
 clean_reinstall_all() {
     echo -e "${RED}==== 全新安装 ====${NC}"
     read -p "确认清除所有数据？(y/N): " confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi
-
     perform_cleanup
-    init_environment_checks # 清理后再检查
-
+    init_environment_checks
     echo -e "${GREEN}>>> 3秒后开始安装...${NC}"
     sleep 3
     add_new_instance_logic
 }
 
 add_new_instance() {
-    init_environment_checks # 按需加载
+    init_environment_checks
     add_new_instance_logic "$@"
 }
 
@@ -194,7 +213,6 @@ add_new_instance_logic() {
     read -p "实例名称: " input_name
     local inst_name="${input_name:-$default_name}"
     if [ -z "$inst_name" ]; then inst_name="telebox_01"; fi
-
     if [[ ! "$inst_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then echo -e "${RED}名称非法${NC}"; return; fi
     local dir="$INSTANCES_DIR/$inst_name"
     if [ -d "$dir" ]; then echo -e "${RED}已存在${NC}"; return; fi
@@ -203,28 +221,17 @@ add_new_instance_logic() {
     mkdir -p "$dir"
     echo -e "${CYAN}>>> [2/5] 克隆代码...${NC}"
     git clone "$GITHUB_REPO" "$dir"
-
     echo -e "${CYAN}>>> [3/5] 安装依赖...${NC}"
     cd "$dir"
     smart_npm_install
-
-    echo -e "${YELLOW}======================================================${NC}"
     echo -e "${YELLOW}>>> [4/5] 交互登录: 看到 Connected 后按 Ctrl+C <<<${NC}"
-    echo -e "${YELLOW}======================================================${NC}"
     read -p "按回车继续..."
     echo -e "\n${RED}>>> [等待] 看到 'You should now be connected.' 后 -> 按 Ctrl+C <<<${NC}\n"
-
-    set +e
-    trap 'echo -e "\n${GREEN}>>> 转入后台...${NC}"' SIGINT
-    npm start
-    trap - SIGINT
-    set -e
-
+    set +e; trap 'echo -e "\n${GREEN}>>> 转入后台...${NC}"' SIGINT; npm start; trap - SIGINT; set -e
     echo -e "\n${CYAN}>>> [5/5] 配置 PM2...${NC}"
     mkdir -p "$dir/logs"
     generate_ecosystem "$inst_name" "$dir"
-    pm2 start ecosystem.config.js
-    pm2 save
+    pm2 start ecosystem.config.js; pm2 save
     echo -e "${GREEN}✔ 完成${NC}"
 }
 
@@ -232,9 +239,7 @@ update_lossless() {
     echo -e "${BLUE}==== 无损更新 ====${NC}"
     local instances=$(get_instances)
     if [ -z "$instances" ]; then echo -e "${YELLOW}无实例。${NC}"; return; fi
-
-    init_environment_checks # 按需加载
-
+    init_environment_checks
     for inst in $instances; do
         echo -e "${CYAN}>>> 更新: $inst ...${NC}"
         local dir="$INSTANCES_DIR/$inst"
@@ -242,8 +247,7 @@ update_lossless() {
         cd "$dir"
         generate_ecosystem "$inst" "$dir"
         pm2 stop ecosystem.config.js 2>/dev/null || true
-        local current_branch=$(git rev-parse --abbrev-ref HEAD)
-        git pull origin "$current_branch" || echo -e "${RED}Git 失败${NC}"
+        git pull origin "$(git rev-parse --abbrev-ref HEAD)" || echo -e "${RED}Git 失败${NC}"
         smart_npm_install
         pm2 restart ecosystem.config.js
         echo -e "${GREEN}✔ $inst 完成${NC}"
@@ -251,28 +255,34 @@ update_lossless() {
 }
 
 reinstall_core_lossless() {
-    echo -e "${BLUE}==== 无损重装 ====${NC}"
+    echo -e "${BLUE}==== 无损重装 (适配目录结构) ====${NC}"
     local instances=$(get_instances)
     if [ -z "$instances" ]; then echo -e "${YELLOW}无实例。${NC}"; return; fi
-
     echo "当前: $instances" | xargs
     read -p "目标 (all/名称): " target
-
     local list_to_process=""
     if [ "$target" == "all" ]; then list_to_process=$instances; else list_to_process=$target; fi
-
-    init_environment_checks # 按需加载
-
+    init_environment_checks
     for inst in $list_to_process; do
         if [ ! -d "$INSTANCES_DIR/$inst" ]; then continue; fi
         echo -e "${CYAN}>>> 重装: $inst ...${NC}"
         local dir="$INSTANCES_DIR/$inst"
-        local temp_session="/tmp/tb_sess_bk_$inst"
+
+        # 定义临时备份目录
+        local tmp_bk="/tmp/tb_bk_$inst"
+        rm -rf "$tmp_bk"
+        mkdir -p "$tmp_bk"
 
         if [ -d "$dir" ]; then cd "$dir"; pm2 delete ecosystem.config.js 2>/dev/null || true; fi
 
-        rm -rf "$temp_session"
-        [ -d "$dir/session" ] && cp -r "$dir/session" "$temp_session"
+        # 备份关键数据 (根据提供的结构)
+        echo "   - 备份用户数据..."
+        [ -d "$dir/my_session" ] && cp -r "$dir/my_session" "$tmp_bk/"
+        [ -d "$dir/session" ] && cp -r "$dir/session" "$tmp_bk/"
+        [ -d "$dir/plugins" ] && cp -r "$dir/plugins" "$tmp_bk/"
+        [ -d "$dir/assets" ] && cp -r "$dir/assets" "$tmp_bk/"
+        [ -d "$dir/temp" ] && cp -r "$dir/temp" "$tmp_bk/"
+        [ -f "$dir/.env" ] && cp "$dir/.env" "$tmp_bk/"
 
         cd "$INSTANCES_DIR" || cd "$HOME"
         rm -rf "$dir"
@@ -280,66 +290,41 @@ reinstall_core_lossless() {
         cd "$dir"
         smart_npm_install
 
-        [ -d "$temp_session" ] && mv "$temp_session" "$dir/session"
+        # 还原
+        echo "   - 还原用户数据..."
+        [ -d "$tmp_bk/my_session" ] && rm -rf "$dir/my_session" && mv "$tmp_bk/my_session" "$dir/"
+        [ -d "$tmp_bk/session" ] && rm -rf "$dir/session" && mv "$tmp_bk/session" "$dir/"
+        [ -d "$tmp_bk/plugins" ] && rm -rf "$dir/plugins" && mv "$tmp_bk/plugins" "$dir/"
+        [ -d "$tmp_bk/assets" ] && rm -rf "$dir/assets" && mv "$tmp_bk/assets" "$dir/"
+        [ -d "$tmp_bk/temp" ] && rm -rf "$dir/temp" && mv "$tmp_bk/temp" "$dir/"
+        [ -f "$tmp_bk/.env" ] && mv "$tmp_bk/.env" "$dir/"
+
         mkdir -p "$dir/logs"
         generate_ecosystem "$inst" "$dir"
-        pm2 start ecosystem.config.js
-        pm2 save
+        pm2 start ecosystem.config.js; pm2 save
         echo -e "${GREEN}✔ 重装完成${NC}"
     done
 }
 
-memory_gc_info() {
-    # 纯查看，不需要安装依赖
-    echo -e "${BLUE}==== 内存状态 ====${NC}"
-    if command -v pm2 >/dev/null 2>&1; then pm2 list | grep -iE "telebox|App name|id"; else echo "PM2 未运行"; fi
-}
-
-uninstall_all() {
-    # 纯清理，不需要安装依赖
-    echo -e "${RED}==== 卸载全部 ====${NC}"
-    read -p "确认删除所有？(y/N): " confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi
-    perform_cleanup
-}
-
+memory_gc_info() { echo -e "${BLUE}==== 内存状态 ====${NC}"; if command -v pm2 >/dev/null 2>&1; then pm2 list | grep -iE "telebox|App name|id"; else echo "PM2 未运行"; fi; }
+uninstall_all() { echo -e "${RED}==== 卸载全部 ====${NC}"; read -p "确认删除所有？(y/N): " confirm; if [[ ! "$confirm" =~ ^[Yy]$ ]]; then return; fi; perform_cleanup; }
 show_menu() {
     clear
     echo -e "${BLUE}#############################################${NC}"
-    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.15)        #${NC}"
+    echo -e "${BLUE}#       TeleBox 多实例管理器 (v2.17)        #${NC}"
     echo -e "${BLUE}#############################################${NC}"
     echo -e "1. 全新安装 (清理+新建)"
     echo -e "2. 添加实例"
     echo -e "3. 无损更新"
-    echo -e "4. 无损重装 (智能修复)"
+    echo -e "4. 无损重装 (保留 my_session/plugins/assets)"
     echo -e "5. 内存状态"
     echo -e "6. 卸载全部"
-    if [ -d "$LEGACY_APP_DIR" ]; then echo -e "${YELLOW}7. 导入旧版${NC}"; fi
+    if [ -d "$LEGACY_APP_DIR" ]; then echo -e "${YELLOW}7. 导入旧版 (数据注入模式)${NC}"; fi
     echo -e "0. 退出"
     echo -e "${BLUE}#############################################${NC}"
-    local instances=$(get_instances)
-    echo -e "当前实例: ${YELLOW}${instances:-无}${NC}"
+    echo -e "当前实例: ${YELLOW}$(get_instances | xargs)${NC}"
     echo
 }
 
-main() {
-    while true; do
-        show_menu
-        read -p "请选择: " choice
-        echo
-        case $choice in
-            1) clean_reinstall_all ;;
-            2) add_new_instance ;;
-            3) update_lossless ;;
-            4) reinstall_core_lossless ;;
-            5) memory_gc_info ;;
-            6) uninstall_all ;;
-            7) import_legacy ;;
-            0) exit 0 ;;
-            *) echo "无效选项" ;;
-        esac
-        [ "$choice" != "0" ] && read -p "按回车键返回菜单..."
-    done
-}
-
+main() { while true; do show_menu; read -p "请选择: " choice; echo; case $choice in 1) clean_reinstall_all;; 2) add_new_instance;; 3) update_lossless;; 4) reinstall_core_lossless;; 5) memory_gc_info;; 6) uninstall_all;; 7) import_legacy;; 0) exit 0;; *) echo "无效";; esac; [ "$choice" != "0" ] && read -p "回车继续..."; done; }
 main
