@@ -1,12 +1,25 @@
 #!/usr/bin/env bash
 
 # TeleBox Docker Compose 一键安装脚本（使用预构建镜像）
-# Version: 2.2.0
+# Version: 2.2.1
 
 if [[ $EUID -ne 0 ]]; then
     echo "错误：本脚本需要 root 权限执行。" 1>&2
     exit 1
 fi
+
+# Docker Compose 兼容函数
+docker_compose_wrapper() {
+    if command -v docker-compose >> /dev/null 2>&1; then
+        docker-compose "$@"
+    elif docker compose version >> /dev/null 2>&1; then
+        docker compose "$@"
+    else
+        echo "错误：Docker Compose 未安装"
+        echo "请运行: apt-get install docker-compose-plugin 或 yum install docker-compose-plugin"
+        exit 1
+    fi
+}
 
 welcome() {
     echo
@@ -157,11 +170,11 @@ docker_check() {
 
     # 检查 Docker Compose 插件
     if command -v docker-compose >> /dev/null 2>&1; then
-        echo "Docker Compose 已安装"
+        echo "Docker Compose v1 已安装"
     elif docker compose version >> /dev/null 2>&1; then
         echo "Docker Compose Plugin 已安装"
     else
-        echo "警告：Docker Compose 未安装，某些功能可能受限"
+        echo "警告：Docker Compose 未安装，将使用 docker compose 子命令"
     fi
 }
 
@@ -311,7 +324,7 @@ EOF
     # 停止并删除现有容器（如果存在）
     if docker ps -a --format "{{.Names}}" | grep -q "^$container_name$"; then
         echo "检测到同名容器，正在停止并删除 . . ."
-        docker-compose -f "$temp_dir/docker-compose.yml" down --remove-orphans > /dev/null 2>&1
+        docker_compose_wrapper -f "$temp_dir/docker-compose.yml" down --remove-orphans > /dev/null 2>&1
     fi
 }
 
@@ -330,7 +343,7 @@ start_compose_interactive() {
     temp_dir="/tmp/telebox-compose-$container_name"
 
     # 第一步：交互式安装
-    docker-compose -f "$temp_dir/docker-compose.yml" run --rm --name "$container_name" telebox bash -lc "set -e; \
+    docker_compose_wrapper -f "$temp_dir/docker-compose.yml" run --rm --name "$container_name" telebox bash -lc "set -e; \
         echo '欢迎使用 TeleBox 安装向导'; \
         echo '请按照提示完成 Telegram 账号配置'; \
         echo '如果 TeleBox 未安装，将自动安装...'; \
@@ -360,7 +373,7 @@ start_compose_daemon() {
 
     # 启动服务
     echo "正在以后台模式启动 TeleBox . . ."
-    docker-compose -f "$temp_dir/docker-compose.yml" up -d
+    docker_compose_wrapper -f "$temp_dir/docker-compose.yml" up -d
 
     echo
     echo "=========================================="
@@ -375,10 +388,10 @@ start_compose_daemon() {
     echo "  容器内: /root/telebox"
     echo
     echo "常用命令："
-    echo "  查看日志: docker-compose -f $temp_dir/docker-compose.yml logs -f"
-    echo "  进入容器: docker-compose -f $temp_dir/docker-compose.yml exec telebox bash"
-    echo "  重启服务: docker-compose -f $temp_dir/docker-compose.yml restart"
-    echo "  停止服务: docker-compose -f $temp_dir/docker-compose.yml down"
+    echo "  查看日志: docker_compose_wrapper -f $temp_dir/docker-compose.yml logs -f"
+    echo "  进入容器: docker_compose_wrapper -f $temp_dir/docker-compose.yml exec telebox bash"
+    echo "  重启服务: docker_compose_wrapper -f $temp_dir/docker-compose.yml restart"
+    echo "  停止服务: docker_compose_wrapper -f $temp_dir/docker-compose.yml down"
     echo "  查看文件: ls -la /root/Docker_Telebox/$container_name/telebox"
     echo
 }
@@ -421,7 +434,7 @@ cleanup() {
 
     if [ -f "$temp_dir/docker-compose.yml" ]; then
         # 使用 docker-compose 停止并删除容器
-        docker-compose -f "$temp_dir/docker-compose.yml" down --remove-orphans > /dev/null 2>&1
+        docker_compose_wrapper -f "$temp_dir/docker-compose.yml" down --remove-orphans > /dev/null 2>&1
     elif docker inspect "$container_name" &>/dev/null; then
         # 如果 compose 文件不存在，则直接删除容器
         docker rm -f "$container_name" &>/dev/null
@@ -493,7 +506,7 @@ stop_telebox() {
         fi
     else
         # 使用 docker-compose 停止服务
-        docker-compose -f "$temp_dir/docker-compose.yml" down > /dev/null 2>&1
+        docker_compose_wrapper -f "$temp_dir/docker-compose.yml" down > /dev/null 2>&1
         echo
         echo "TeleBox 已关闭"
         echo
@@ -532,7 +545,7 @@ start_telebox() {
     echo "正在启动 TeleBox 容器 . . ."
 
     # 使用 docker-compose 启动服务
-    docker-compose -f "$temp_dir/docker-compose.yml" up -d > /dev/null 2>&1
+    docker_compose_wrapper -f "$temp_dir/docker-compose.yml" up -d > /dev/null 2>&1
 
     echo
     echo "TeleBox 启动完成"
@@ -571,7 +584,7 @@ restart_telebox() {
     echo "正在重启 TeleBox 容器 . . ."
 
     # 使用 docker-compose 重启服务
-    docker-compose -f "$temp_dir/docker-compose.yml" restart > /dev/null 2>&1
+    docker_compose_wrapper -f "$temp_dir/docker-compose.yml" restart > /dev/null 2>&1
 
     echo
     echo "TeleBox 重启完成"
@@ -609,7 +622,7 @@ reinstall_telebox() {
     # 停止并删除现有容器
     temp_dir="/tmp/telebox-compose-$container_name"
     if [ -f "$temp_dir/docker-compose.yml" ]; then
-        docker-compose -f "$temp_dir/docker-compose.yml" down --remove-orphans > /dev/null 2>&1
+        docker_compose_wrapper -f "$temp_dir/docker-compose.yml" down --remove-orphans > /dev/null 2>&1
     elif docker inspect "$container_name" &>/dev/null; then
         docker rm -f "$container_name" &>/dev/null
     fi
@@ -683,7 +696,7 @@ view_logs() {
     else
         echo "正在查看日志 (按 Ctrl+C 退出)..."
         echo
-        docker-compose -f "$temp_dir/docker-compose.yml" logs -f
+        docker_compose_wrapper -f "$temp_dir/docker-compose.yml" logs -f
     fi
 
     show_menu
@@ -728,7 +741,7 @@ enter_container() {
         echo "提示：TeleBox 文件位于 /root/telebox 目录"
         echo "      输入 'exit' 退出容器"
         echo
-        docker-compose -f "$temp_dir/docker-compose.yml" exec telebox bash
+        docker_compose_wrapper -f "$temp_dir/docker-compose.yml" exec telebox bash
     fi
 
     show_menu
@@ -826,7 +839,7 @@ show_container_info() {
         echo "  nano config.json"
         echo
         echo "方法 2: 进入容器"
-        echo "  docker-compose -f $temp_dir/docker-compose.yml exec telebox bash"
+        echo "  docker_compose_wrapper -f $temp_dir/docker-compose.yml exec telebox bash"
         echo "  cd /root/telebox"
         echo
 
@@ -921,7 +934,7 @@ restore_telebox() {
     # 停止容器（如果正在运行）
     temp_dir="/tmp/telebox-compose-$container_name"
     if [ -f "$temp_dir/docker-compose.yml" ]; then
-        docker-compose -f "$temp_dir/docker-compose.yml" down > /dev/null 2>&1
+        docker_compose_wrapper -f "$temp_dir/docker-compose.yml" down > /dev/null 2>&1
         echo "容器已停止"
     elif docker inspect "$container_name" &>/dev/null; then
         docker stop "$container_name" 2>/dev/null
@@ -935,7 +948,7 @@ restore_telebox() {
 
     # 重新启动容器（如果存在 compose 文件）
     if [ -f "$temp_dir/docker-compose.yml" ]; then
-        docker-compose -f "$temp_dir/docker-compose.yml" up -d > /dev/null 2>&1
+        docker_compose_wrapper -f "$temp_dir/docker-compose.yml" up -d > /dev/null 2>&1
         echo "容器已重启"
     else
         echo "请使用菜单选项 1 创建新容器"
@@ -969,7 +982,7 @@ show_menu() {
     echo "  12) 更新 TeleBox 镜像"
     echo "  0) 退出脚本"
     echo
-    echo "  版本: 2.2.0"
+    echo "  版本: 2.2.1"
     echo "  项目地址: https://github.com/Seikolove/TeleBox"
     echo
     echo -n "请输入编号: "
