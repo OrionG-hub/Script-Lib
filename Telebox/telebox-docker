@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # TeleBox Docker Compose 一键安装脚本（使用预构建镜像）
-# Version: 2.2.1
+# Version: 2.2.2
 
 if [[ $EUID -ne 0 ]]; then
     echo "错误：本脚本需要 root 权限执行。" 1>&2
@@ -48,15 +48,9 @@ check_telebox_image() {
         echo "TeleBox 镜像已存在，使用现有镜像。"
         return 0
     else
-        echo "TeleBox 镜像不存在，尝试从远程拉取..."
-        if docker pull telebox:latest; then
-            echo "TeleBox 镜像拉取成功！"
-            return 0
-        else
-            echo "远程镜像不存在，需要构建本地镜像..."
-            build_telebox_image
-            return 0
-        fi
+        echo "TeleBox 镜像不存在，正在构建本地镜像..."
+        build_telebox_image
+        return 0
     fi
 }
 
@@ -311,7 +305,7 @@ services:
     restart: unless-stopped
     volumes:
       - "/root/Docker_Telebox/\${CONTAINER_NAME:-telebox}:/root"
-    pull_policy: always
+    pull_policy: never  # 不从远程拉取镜像
     environment:
       - API_ID=\${API_ID}
       - API_HASH=\${API_HASH}
@@ -652,13 +646,8 @@ reinstall_telebox() {
 update_telebox_image() {
     echo "正在更新 TeleBox 镜像..."
 
-    # 尝试从远程拉取最新镜像
-    if docker pull telebox:latest; then
-        echo "TeleBox 镜像更新成功！"
-    else
-        echo "远程镜像不可用，重新构建本地镜像..."
-        build_telebox_image
-    fi
+    # 重新构建镜像
+    build_telebox_image
 }
 
 view_logs() {
@@ -982,7 +971,7 @@ show_menu() {
     echo "  12) 更新 TeleBox 镜像"
     echo "  0) 退出脚本"
     echo
-    echo "  版本: 2.2.1"
+    echo "  版本: 2.2.2"
     echo "  项目地址: https://github.com/Seikolove/TeleBox"
     echo
     echo -n "请输入编号: "
