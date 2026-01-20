@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # TeleBox Docker Compose 一键安装脚本（使用预构建镜像）
-# Version: 2.2.2
+# Version: 2.2.3
 
 if [[ $EUID -ne 0 ]]; then
     echo "错误：本脚本需要 root 权限执行。" 1>&2
@@ -344,7 +344,7 @@ start_compose_interactive() {
         if [ ! -d '/root/telebox' ]; then \
             curl -fsSL https://github.com/EAlyce/conf/raw/refs/heads/main/Linux/installTeleBox.sh -o /root/installTeleBox.sh; \
             chmod +x /root/installTeleBox.sh; \
-            /root/installTeleBox.sh; \
+            API_ID='$api_id' API_HASH='$api_hash' /root/installTeleBox.sh; \
             rm /root/installTeleBox.sh; \
         fi; \
         echo ''; \
@@ -971,7 +971,7 @@ show_menu() {
     echo "  12) 更新 TeleBox 镜像"
     echo "  0) 退出脚本"
     echo
-    echo "  版本: 2.2.2"
+    echo "  版本: 2.2.3"
     echo "  项目地址: https://github.com/Seikolove/TeleBox"
     echo
     echo -n "请输入编号: "
