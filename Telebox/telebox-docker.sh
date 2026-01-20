@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-# TeleBox Docker Compose 一键安装脚本（使用预构建镜像）
-# Version: 2.2.3
+# TeleBox Docker Compose 一键安装脚本
+# Version: 2.3.0
 
 if [[ $EUID -ne 0 ]]; then
     echo "错误：本脚本需要 root 权限执行。" 1>&2
@@ -37,68 +37,6 @@ validate_container_name() {
         return 1
     fi
     return 0
-}
-
-check_telebox_image() {
-    local image_name="telebox:latest"
-
-    echo "正在检查 TeleBox 镜像是否存在..."
-
-    if docker images --format "{{.Repository}}:{{.Tag}}" | grep -q "^telebox:latest$"; then
-        echo "TeleBox 镜像已存在，使用现有镜像。"
-        return 0
-    else
-        echo "TeleBox 镜像不存在，正在构建本地镜像..."
-        build_telebox_image
-        return 0
-    fi
-}
-
-build_telebox_image() {
-    echo "开始构建 TeleBox 镜像..."
-
-    # 创建临时目录和 Dockerfile
-    temp_build_dir="/tmp/telebox-build-$(date +%s)"
-    mkdir -p "$temp_build_dir"
-
-    # 创建 Dockerfile
-    cat > "$temp_build_dir/Dockerfile" << 'EOF'
-FROM debian:12
-
-# 安装必要的依赖
-RUN apt-get update && \
-    apt-get install -y curl ca-certificates gnupg sudo && \
-    update-ca-certificates && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    npm i -g pm2 && \
-    rm -rf /var/lib/apt/lists/*
-
-# 设置工作目录
-WORKDIR /root
-
-# 默认命令 - 安装 TeleBox（如果不存在）并启动
-CMD ["bash", "-c", "set -e; \
-    if [ ! -d '/root/telebox' ]; then \
-        curl -fsSL https://raw.githubusercontent.com/OrionG-hub/Script-Lib/refs/heads/master/Telebox/installTeleBox.sh -o /root/installTeleBox.sh && \
-        chmod +x /root/installTeleBox.sh && \
-        /root/installTeleBox.sh && \
-        rm /root/installTeleBox.sh; \
-    fi; \
-    exec pm2-runtime /root/telebox/ecosystem.config.js"]
-EOF
-
-    # 构建镜像
-    if docker build -t telebox:latest "$temp_build_dir"; then
-        echo "TeleBox 镜像构建成功！"
-        # 清理临时目录
-        rm -rf "$temp_build_dir"
-        return 0
-    else
-        echo "镜像构建失败，清理临时文件..."
-        rm -rf "$temp_build_dir"
-        return 1
-    fi
 }
 
 list_telebox_containers() {
@@ -294,21 +232,31 @@ API_ID=$api_id
 API_HASH=$api_hash
 EOF
 
-    # 创建 docker-compose.yml 文件（使用预构建镜像）
+    # 创建 docker-compose.yml 文件
     cat > "$temp_dir/docker-compose.yml" << EOF
 version: '3.8'
 
 services:
   telebox:
-    image: telebox:latest
+    image: debian:12
     container_name: \${CONTAINER_NAME:-telebox}
     restart: unless-stopped
     volumes:
       - "/root/Docker_Telebox/\${CONTAINER_NAME:-telebox}:/root"
-    pull_policy: never  # 不从远程拉取镜像
-    environment:
-      - API_ID=\${API_ID}
-      - API_HASH=\${API_HASH}
+    pull_policy: always
+    command: >
+      bash -lc "set -e;
+      apt-get update;
+      apt-get install -y curl ca-certificates gnupg sudo;
+      update-ca-certificates;
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash -;
+      apt-get install -y nodejs;
+      npm i -g pm2;
+      [ -f /root/telebox/ecosystem.config.js ] ||
+      (curl -fsSL https://github.com/EAlyce/conf/raw/refs/heads/main/Linux/installTeleBox.sh -o /root/installTeleBox.sh;
+      chmod +x /root/installTeleBox.sh;
+      /root/installTeleBox.sh);
+      exec pm2-runtime /root/telebox/ecosystem.config.js"
 EOF
 
     echo "数据目录: $data_dir"
@@ -338,15 +286,15 @@ start_compose_interactive() {
 
     # 第一步：交互式安装
     docker_compose_wrapper -f "$temp_dir/docker-compose.yml" run --rm --name "$container_name" telebox bash -lc "set -e; \
-        echo '欢迎使用 TeleBox 安装向导'; \
-        echo '请按照提示完成 Telegram 账号配置'; \
-        echo '如果 TeleBox 未安装，将自动安装...'; \
-        if [ ! -d '/root/telebox' ]; then \
-            curl -fsSL https://github.com/EAlyce/conf/raw/refs/heads/main/Linux/installTeleBox.sh -o /root/installTeleBox.sh; \
-            chmod +x /root/installTeleBox.sh; \
-            API_ID='$api_id' API_HASH='$api_hash' /root/installTeleBox.sh; \
-            rm /root/installTeleBox.sh; \
-        fi; \
+        apt-get update; \
+        apt-get install -y curl ca-certificates gnupg sudo; \
+        update-ca-certificates; \
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
+        apt-get install -y nodejs; \
+        npm i -g pm2; \
+        curl -fsSL https://github.com/EAlyce/conf/raw/refs/heads/main/Linux/installTeleBox.sh -o /root/installTeleBox.sh; \
+        chmod +x /root/installTeleBox.sh; \
+        /root/installTeleBox.sh; \
         echo ''; \
         echo '安装完成，正在保存 PM2 配置...'; \
         pm2 ls; \
@@ -395,7 +343,6 @@ start_installation() {
     welcome
     docker_check
     access_check
-    check_telebox_image  # 检查或构建 TeleBox 镜像
     build_compose_env
     start_compose_interactive
     start_compose_daemon
@@ -637,17 +584,9 @@ reinstall_telebox() {
     esac
 
     echo
-    check_telebox_image  # 检查或构建 TeleBox 镜像
     build_compose_env
     start_compose_interactive
     start_compose_daemon
-}
-
-update_telebox_image() {
-    echo "正在更新 TeleBox 镜像..."
-
-    # 重新构建镜像
-    build_telebox_image
 }
 
 view_logs() {
@@ -770,10 +709,6 @@ show_container_info() {
         # 容器 ID
         container_id=$(docker inspect -f '{{.Id}}' "$container_name" | cut -c1-12)
         echo "容器 ID: $container_id"
-
-        # 镜像信息
-        image=$(docker inspect -f '{{.Config.Image}}' "$container_name")
-        echo "镜像: $image"
 
         # 数据目录
         data_dir="/root/Docker_Telebox/$container_name"
@@ -968,10 +903,9 @@ show_menu() {
     echo "  9) 查看容器信息"
     echo "  10) 备份 TeleBox"
     echo "  11) 恢复 TeleBox"
-    echo "  12) 更新 TeleBox 镜像"
     echo "  0) 退出脚本"
     echo
-    echo "  版本: 2.2.3"
+    echo "  版本: 2.3.0"
     echo "  项目地址: https://github.com/Seikolove/TeleBox"
     echo
     echo -n "请输入编号: "
@@ -1010,10 +944,6 @@ show_menu() {
             ;;
         11)
             restore_telebox
-            ;;
-        12)
-            update_telebox_image
-            show_menu
             ;;
         0)
             echo "感谢使用，再见！"
