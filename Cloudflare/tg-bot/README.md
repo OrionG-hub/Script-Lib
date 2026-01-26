@@ -9,7 +9,8 @@
 ## ✨ 项目简介
 
 这是一个基于 **Cloudflare Worker** 和 **D1 数据库** 构建的高性能 Telegram 双向机器人。  
-**Telegram 双向机器人 Cloudflare Worker 混合验证版** 带来了质的飞跃：完美继承私聊消息转发到群组话题的 CRM 核心能力，更引入 **三模态混合验证系统**（Cloudflare/Google/关闭）与 **独立问题验证** 机制，配合全新可视化协管管理，为您提供企业级私聊托管与风控解决方案。
+**Telegram 双向机器人 Cloudflare Worker 混合验证版** 带来了质的飞跃：完美继承私聊消息转发到群组话题的 CRM 核心能力，更引入 **三模态混合验证系统**（Cloudflare/Google/关闭）与 **独立问题验证** 机制，配合全新可视化协管管理，为您提供企业级私聊托管与风控解决方案。  
+项目来源：[原项目地址](https://github.com/huliyoudiangou/TG_Chat_Bot-D1)，本仓库是针对 worker.js 进行了部分代码修改。
 
 ---
 
