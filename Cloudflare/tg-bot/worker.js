@@ -9,7 +9,7 @@
 
 // --- 1. 静态配置与常量 ---
 // 缓存系统，用于减少数据库读写压力，降低 Worker KV/D1 计费
-const CACHE = { data: {}, ts: 0, ttl: 60000, user_locks: {}, warn_cd: {}, admin: { ts: 0, ttl: 60000, primary: new Set(), auth: new Set() } };
+const CACHE = { data: {}, ts: 0, ttl: 60000, configLoading: null, configVersion: 0, user_locks: {}, warn_cd: {}, admin: { ts: 0, ttl: 60000, primary: new Set(), auth: new Set() } };
 
 const DEFAULTS = {
     // 基础设置
@@ -121,15 +121,29 @@ const sql = async (env, query, args = [], type = 'run') => {
 
 // 获取配置项：优先命中内存缓存以提升响应速度
 async function getCfg(key, env) {
-    const now = Date.now();
-    if (CACHE.ts && (now - CACHE.ts) < CACHE.ttl && CACHE.data[key] !== undefined) return CACHE.data[key];
-
-    const rows = await sql(env, "SELECT * FROM config", [], 'all');
-    if (rows && rows.results) {
-        CACHE.data = {};
-        rows.results.forEach(r => CACHE.data[r.key] = r.value);
-        CACHE.ts = now;
+    // 管理员输入状态跨请求、跨实例变化，按主键实时读取，不缓存缺失状态。
+    if (key.startsWith('admin_state:')) {
+        const row = await sql(env, "SELECT value FROM config WHERE key=?", key, 'first');
+        return row?.value ?? "";
     }
+    while (!CACHE.ts || Date.now() - CACHE.ts >= CACHE.ttl) {
+        const version = CACHE.configVersion;
+        if (!CACHE.configLoading) {
+            CACHE.configLoading = (async () => {
+                const rows = await sql(env, "SELECT * FROM config", [], 'all');
+                // 配置写入期间返回的旧快照不能重新填充缓存。
+                if (version !== CACHE.configVersion) return false;
+                if (rows?.results) {
+                    CACHE.data = Object.fromEntries(rows.results.map(r => [r.key, r.value]));
+                    CACHE.ts = Date.now();
+                }
+                return true;
+            })().finally(() => { CACHE.configLoading = null; });
+        }
+        const current = await CACHE.configLoading;
+        if (current && version === CACHE.configVersion) break;
+    }
+    // 快照内缺失的键同样命中缓存，直接回退环境变量或默认值。
     const envKey = key.toUpperCase().replace(/_MSG|_Q|_A/, m => ({'_MSG':'_MESSAGE','_Q':'_QUESTION','_A':'_ANSWER'}[m]));
     return CACHE.data[key] !== undefined ? CACHE.data[key] : (env[envKey] || DEFAULTS[key] || "");
 }
@@ -137,6 +151,7 @@ async function getCfg(key, env) {
 // 设置配置项：同步使当前内存缓存失效
 async function setCfg(key, val, env) {
     await sql(env, "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)", [key, val]);
+    CACHE.configVersion += 1;
     CACHE.ts = 0;
     if (key === 'authorized_admins') CACHE.admin.ts = 0;
 }
@@ -145,6 +160,7 @@ async function setCfg(key, val, env) {
 async function deleteCfg(key, env) {
     await sql(env, "DELETE FROM config WHERE key=?", key);
     delete CACHE.data[key];
+    CACHE.configVersion += 1;
     CACHE.ts = 0;
     if (key === 'authorized_admins') CACHE.admin.ts = 0;
 }
@@ -179,6 +195,7 @@ async function updUser(id, data, env) {
         if (user_info) {
             // 普通资料写入可能来自旧请求；卡片状态只能通过 card_info 显式修改。
             infoExpr = `json_set(?, '$.card_msg_id', json_extract(${infoExpr}, '$.card_msg_id'),
+                '$.card_type', json_extract(${infoExpr}, '$.card_type'),
                 '$.dummy_msg_id', json_extract(${infoExpr}, '$.dummy_msg_id'),
                 '$.join_date', json_extract(${infoExpr}, '$.join_date'))`;
             values.push(JSON.stringify(user_info));
@@ -225,6 +242,7 @@ async function migrateDb(env) {
     await ensureColumn(env, "processed_updates", "processed_at", "INTEGER DEFAULT 0");
     await safeDbRun(env, `CREATE INDEX IF NOT EXISTS idx_users_topic_id ON users(topic_id)`);
     await safeDbRun(env, `CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date)`);
+    await safeDbRun(env, `CREATE INDEX IF NOT EXISTS idx_messages_topic_message_id ON messages(topic_message_id)`);
     await safeDbRun(env, `CREATE INDEX IF NOT EXISTS idx_processed_updates_time ON processed_updates(processed_at)`);
 }
 
@@ -648,7 +666,7 @@ async function handleAdminCommand(msg, env, cmd) {
             chat_id: env.ADMIN_GROUP_ID,
             message_thread_id: msg.message_thread_id
         }).catch(() => {});
-        await updUser(targetUid, { topic_id: null, topic_creating: false, topic_lock_at: null, card_info: { card_msg_id: null, dummy_msg_id: null } }, env);
+        await updUser(targetUid, { topic_id: null, topic_creating: false, topic_lock_at: null, card_info: { card_msg_id: null, card_type: null, dummy_msg_id: null } }, env);
         await sql(env, "DELETE FROM messages WHERE user_id=?", [targetUid]);
     }
 }
@@ -980,7 +998,7 @@ async function relayToTopic(msg, u, env) {
                 const dummy = await api(env.BOT_TOKEN, "sendMessage", { chat_id: env.ADMIN_GROUP_ID, message_thread_id: tid, text: "✨ 正在加载用户资料...", disable_notification: true });
                 u.user_info.dummy_msg_id = dummy.message_id;
                 await updUser(uid, { topic_id: tid, topic_creating: false, topic_lock_at: null, user_info: u.user_info,
-                    card_info: { card_msg_id: null, dummy_msg_id: dummy.message_id } }, env);
+                    card_info: { card_msg_id: null, card_type: null, dummy_msg_id: dummy.message_id } }, env);
             }
         } catch (e) {
             console.error("Topic Creation Failed:", e);
@@ -1097,7 +1115,7 @@ async function ensureInfoCardBeforeRelay(env, u, tgUser, tid, date) {
             const joinDate = u.user_info.join_date || date || (Date.now() / 1000);
             const cardId = await sendInfoCardToTopic(env, u, profile, tid, joinDate);
             if (!cardId) throw new Error("资料卡创建失败");
-            await updUser(u.user_id, { card_info: { card_msg_id: cardId, join_date: joinDate } }, env);
+            await updUser(u.user_id, { card_info: { card_msg_id: cardId, card_type: u.user_info.card_type, join_date: joinDate } }, env);
             u.user_info.card_msg_id = cardId;
             u.user_info.join_date = joinDate;
             // 先保存 ID 再置顶，避免置顶耗时或失败扩大重复创建窗口。
@@ -1128,29 +1146,40 @@ async function updateInfoCardInPlace(env, u, tgUser, date) {
         reply_markup: getBtns(u.user_id, u.is_blocked, meta.username, u.is_muted)
     };
 
-    try {
-        await api(env.BOT_TOKEN, "editMessageCaption", { ...common, caption: meta.card });
-        return true;
-    } catch (captionError) {
-        if (isMessageNotModified(captionError)) return true;
+    const knownType = u.user_info.card_type;
+    const types = ['photo', 'text'].includes(knownType) ? [knownType] : ['photo', 'text'];
+    const errors = [];
+    for (const type of types) {
         try {
-            await api(env.BOT_TOKEN, "editMessageText", { ...common, text: meta.card });
-            return true;
-        } catch (textError) {
-            if (isMessageNotModified(textError)) return true;
-            // Recreate only when Telegram confirms the original card is gone.
-            if (isMessageMissing(captionError) && isMessageMissing(textError)) return false;
-            console.log("Update info card in place failed:", textError.message);
-            return null;
+            await api(env.BOT_TOKEN, type === 'photo' ? "editMessageCaption" : "editMessageText",
+                { ...common, [type === 'photo' ? 'caption' : 'text']: meta.card });
+        } catch (error) {
+            if (!isMessageNotModified(error)) {
+                errors.push(error);
+                continue;
+            }
         }
+        // 旧卡首次成功编辑后记住类型，后续不再试错调用。
+        if (knownType !== type) {
+            await updUser(u.user_id, { card_info: { card_type: type } }, env);
+            u.user_info.card_type = type;
+        }
+        return true;
     }
+    if (errors.every(isMessageMissing)) return false;
+    console.log("Update info card in place failed:", errors.at(-1)?.message);
+    return null;
 }
 
 // --- 核心：发送用户信息复合卡片 ---
 async function sendInfoCardToTopic(env, u, tgUser, tid, date) {
     const meta = getUMeta(tgUser, u, date || (Date.now()/1000));
     // Telegram 发消息没有幂等键：超时/断网/5xx 时可能已发送，不盲目重试建卡。
-    const sendCard = (method, body) => api(env.BOT_TOKEN, method, body, 0, false);
+    const sendCard = async (method, body) => {
+        const result = await api(env.BOT_TOKEN, method, body, 0, false);
+        u.user_info.card_type = method === 'sendPhoto' ? 'photo' : 'text';
+        return result;
+    };
     let bestPhoto = null;
 
     // 1. [容错防护] 非阻塞尝试获取目标用户头像

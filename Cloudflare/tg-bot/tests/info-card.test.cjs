@@ -9,6 +9,7 @@ const vm = require('node:vm');
 // for concurrent Worker instances. Only Telegram's external HTTP API is mocked.
 const source = readFileSync(join(__dirname, '../worker.js'), 'utf8').replace('export default {', 'const worker = {');
 const exportsSource = `;globalThis.bot = { worker, migrateDb, getUser, updUser, ensureInfoCardBeforeRelay,
+    getCfg, setCfg, deleteCfg, handleUpdate,
     rebuildInfoCard, relayToTopic, sendStart, acquireCardLock, releaseCardLock };`;
 const profile = { id: 42, first_name: 'Alice', username: 'alice' };
 const ok = result => ({ status: 200, json: async () => ({ ok: true, result }) });
@@ -18,15 +19,21 @@ async function fixture(t, options = {}) {
     const db = new DatabaseSync(':memory:');
     t.after(() => db.close());
     const calls = [];
+    const queries = [];
     let nextId = 100;
     const env = { BOT_TOKEN: 'test', ADMIN_GROUP_ID: '-100', ADMIN_IDS: '99', TELEGRAM_WEBHOOK_SECRET: 'test-secret', TG_BOT_DB: {
         prepare(query) {
+            queries.push(query.trim().replace(/\s+/g, ' '));
             let args = [];
             return {
                 bind(...values) { args = values; return this; },
                 async run() { return { meta: { changes: Number(db.prepare(query).run(...args).changes) } }; },
                 async first() { return db.prepare(query).get(...args) || null; },
-                async all() { return { results: db.prepare(query).all(...args) }; }
+                async all() {
+                    const result = { results: db.prepare(query).all(...args) };
+                    await options.onAll?.(query, result);
+                    return result;
+                }
             };
         },
         batch(statements) { return Promise.all(statements.map(s => s.run())); }
@@ -43,6 +50,7 @@ async function fixture(t, options = {}) {
     };
     function instance() {
         const context = vm.createContext({ fetch, setTimeout, clearTimeout, AbortController, TypeError, Request, Response, URL,
+            Date: class extends Date { static now() { return options.now ? options.now() : Date.now(); } },
             console: { log() {}, warn() {}, error() {} } });
         vm.runInContext(source + exportsSource, context, { filename: join(__dirname, '../worker.js') });
         return context.bot;
@@ -54,7 +62,7 @@ async function fixture(t, options = {}) {
         .run(options.topic === undefined ? '7' : options.topic, JSON.stringify(info));
     const cardSends = () => calls.filter(c => ['sendPhoto', 'sendMessage'].includes(c.method)
         && (c.body.caption || c.body.text || '').includes('用户身份卡片'));
-    return { bot, env, db, calls, cardSends, instance };
+    return { bot, env, db, calls, queries, cardSends, instance };
 }
 
 function gate() {
@@ -231,4 +239,146 @@ test('integration: webhook → D1 → Telegram, duplicate update and refresh cal
     assert(f.calls.some(c => c.method === 'editMessageCaption' && c.body.message_id === u.user_info.card_msg_id));
     assert(f.calls.some(c => c.body.text === '✅ 资料卡已刷新'));
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM messages').get().n, 2);
+});
+
+const configReads = f => f.queries.filter(q => q === 'SELECT * FROM config').length;
+
+test('missing config keys reuse one snapshot and preserve default/env/empty value precedence', async t => {
+    const f = await fixture(t);
+    f.env.BUSY_MESSAGE = 'environment reply';
+    assert.equal(await f.bot.getCfg('enable_verify', f.env), 'true');
+    assert.equal(await f.bot.getCfg('busy_msg', f.env), 'environment reply');
+    assert.equal(await f.bot.getCfg('unknown_key', f.env), '');
+    assert.equal(configReads(f), 1);
+    await f.bot.setCfg('busy_msg', '', f.env);
+    assert.equal(await f.bot.getCfg('busy_msg', f.env), '');
+    await f.bot.deleteCfg('busy_msg', f.env);
+    assert.equal(await f.bot.getCfg('busy_msg', f.env), 'environment reply');
+    assert.equal(configReads(f), 3);
+});
+
+test('concurrent cold config reads share one database query', async t => {
+    const f = await fixture(t);
+    const values = await Promise.all(Array.from({ length: 20 }, () => f.bot.getCfg('enable_verify', f.env)));
+    assert(values.every(v => v === 'true'));
+    assert.equal(configReads(f), 1);
+});
+
+test('expired config snapshot reloads once and sees external changes', async t => {
+    let now = Date.now();
+    const f = await fixture(t, { now: () => now });
+    assert.equal(await f.bot.getCfg('busy_mode', f.env), 'false');
+    f.db.prepare('INSERT INTO config (key,value) VALUES (?,?)').run('busy_mode', 'true');
+    assert.equal(await f.bot.getCfg('busy_mode', f.env), 'false');
+    now += 60001;
+    assert.equal(await f.bot.getCfg('busy_mode', f.env), 'true');
+    assert.equal(configReads(f), 2);
+});
+
+for (const deleting of [false, true]) {
+    test(`config ${deleting ? 'delete' : 'write'} invalidates an in-flight stale snapshot`, async t => {
+        const entered = gate(), finish = gate();
+        let blocked = false;
+        const f = await fixture(t, { onAll: async query => {
+            if (query === 'SELECT * FROM config' && !blocked) {
+                blocked = true; entered.open(); await finish.promise;
+            }
+        }});
+        f.db.prepare('INSERT INTO config (key,value) VALUES (?,?)').run('busy_msg', 'old');
+        const pending = f.bot.getCfg('busy_msg', f.env);
+        await entered.promise;
+        if (deleting) await f.bot.deleteCfg('busy_msg', f.env);
+        else await f.bot.setCfg('busy_msg', 'new', f.env);
+        const laterReader = f.bot.getCfg('busy_msg', f.env);
+        finish.open();
+        assert.equal(await pending, deleting ? '当前是非营业时间，消息已收到，管理员稍后回复。' : 'new');
+        assert.equal(await laterReader, await pending);
+        assert.equal(configReads(f), 2);
+    });
+}
+
+test('failed config read is not cached and can recover on next request', async t => {
+    let fail = true;
+    const f = await fixture(t, { onAll: async query => {
+        if (query === 'SELECT * FROM config' && fail) { fail = false; throw new Error('database unavailable'); }
+    }});
+    f.db.prepare('INSERT INTO config (key,value) VALUES (?,?)').run('busy_mode', 'true');
+    assert.equal(await f.bot.getCfg('busy_mode', f.env), 'false');
+    assert.equal(await f.bot.getCfg('busy_mode', f.env), 'true');
+    assert.equal(configReads(f), 2);
+});
+
+test('admin input state stays fresh across Worker instances including missing keys', async t => {
+    const f = await fixture(t), b = f.instance();
+    const key = 'admin_state:99';
+    assert.equal(await f.bot.getCfg(key, f.env), '');
+    await b.setCfg(key, '{"action":"input_note","target":"42"}', f.env);
+    assert.equal(await f.bot.getCfg(key, f.env), '{"action":"input_note","target":"42"}');
+    await b.deleteCfg(key, f.env);
+    assert.equal(await f.bot.getCfg(key, f.env), '');
+    assert.equal(configReads(f), 0);
+});
+
+test('reverse message lookup uses the index without changing returned mapping', async t => {
+    const f = await fixture(t);
+    f.db.prepare('INSERT INTO messages (user_id,message_id,topic_message_id) VALUES (?,?,?)').run('42','10','500');
+    const query = 'SELECT user_id,message_id FROM messages WHERE topic_message_id=?';
+    assert.equal(f.db.prepare(query).get('500').message_id, '10');
+    assert(f.db.prepare('EXPLAIN QUERY PLAN ' + query).all('500')
+        .some(row => row.detail.includes('USING INDEX idx_messages_topic_message_id')));
+    await f.bot.migrateDb(f.env); // The migration remains safe to run again.
+    assert.equal(f.db.prepare(query).get('500').user_id, '42');
+});
+
+test('legacy text card remembers type after first edit and skips caption calls thereafter', async t => {
+    const f = await fixture(t, { info: { card_msg_id: 80 }, respond: ({ method }) => {
+        if (method === 'editMessageCaption') return failure('Bad Request: there is no caption in the message to edit');
+        if (method === 'editMessageText') return failure('Bad Request: message is not modified');
+    }});
+    await f.bot.rebuildInfoCard(f.env, '42', '7');
+    assert.equal((await f.bot.getUser('42', f.env)).user_info.card_type, 'text');
+    f.calls.length = 0;
+    assert.equal(await f.instance().rebuildInfoCard(f.env, '42', '7'), 80);
+    assert.deepEqual(f.calls.map(c => c.method), ['editMessageText']);
+    assert.equal(f.cardSends().length, 0);
+});
+
+test('new text cards store type immediately and stale profile writes cannot erase it', async t => {
+    const f = await fixture(t, { photo: false });
+    const stale = await f.bot.getUser('42', f.env);
+    await f.bot.rebuildInfoCard(f.env, '42', '7');
+    await f.bot.updUser('42', { user_info: { ...stale.user_info, note: 'test' } }, f.env);
+    assert.equal((await f.bot.getUser('42', f.env)).user_info.card_type, 'text');
+    f.calls.length = 0;
+    await f.bot.rebuildInfoCard(f.env, '42', '7');
+    assert.deepEqual(f.calls.map(c => c.method), ['editMessageText']);
+});
+
+test('known missing text card can be replaced with a photo card', async t => {
+    const f = await fixture(t, { info: { card_msg_id: 80, card_type: 'text' }, respond: ({ method, body }) => {
+        if (method === 'editMessageText' && body.message_id === 80) return failure('Bad Request: message to edit not found');
+    }});
+    const id = await f.bot.rebuildInfoCard(f.env, '42', '7');
+    assert.notEqual(id, 80);
+    const info = (await f.bot.getUser('42', f.env)).user_info;
+    assert.equal(info.card_type, 'photo');
+    assert.equal(info.card_msg_id, id);
+    assert.equal(f.cardSends().length, 1);
+});
+
+test('integration: warm default-config messages use six D1 statements and retain timestamp edits', async t => {
+    const f = await fixture(t, { info: { card_msg_id: 80, card_type: 'text', join_date: 1000 } });
+    const update = n => ({ update_id: n, message: {
+        message_id: n, date: 1000 + n, chat: { id: 42, type: 'private' }, from: profile, text: 'hello'
+    }});
+    await f.bot.handleUpdate(update(1), f.env, {});
+    const previousText = f.calls.find(c => c.method === 'editMessageText').body.text;
+    f.queries.length = 0; f.calls.length = 0;
+    await f.bot.handleUpdate(update(2), f.env, {});
+    assert.equal(f.queries.length, 6);
+    assert.equal(configReads(f), 0);
+    assert.deepEqual(f.calls.map(c => c.method), ['editMessageText', 'copyMessage']);
+    assert.notEqual(f.calls[0].body.text, previousText);
+    assert.equal(f.calls[0].body.message_id, 80);
+    assert.equal(f.cardSends().length, 0);
 });
