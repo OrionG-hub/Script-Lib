@@ -4,8 +4,9 @@ const DEFAULT_MAX_FILE_MB = 25;
 // 单个 Telegram 相册最多收集并上传 100 张图片
 const DEFAULT_MAX_UPLOAD_QUEUE_IMAGES = 100;
 
-// 相册最后一张图片到达后，等待 5 秒再开始上传，避免漏掉同组图片
-const DEFAULT_ALBUM_WAIT_SECONDS = 5;
+const DEFAULT_ALBUM_WAIT_SECONDS = 2;
+const DEFAULT_UPLOAD_CONCURRENCY = 2;
+const UPLOAD_BUFFER_BUDGET_MB = 50;
 
 // Shlink 自定义短码长度：5 位 Base62，例如 aB7xQ
 const SHORT_CODE_LENGTH = 5;
@@ -84,6 +85,16 @@ async function initDb(env) {
     ]);
 }
 
+async function withDbSchema(env, operation) {
+    try {
+        return await operation();
+    } catch (error) {
+        if (!/no such table: (processed_messages|album_groups|album_messages)\b/.test(safeError(error))) throw error;
+        await initDb(env);
+        return operation();
+    }
+}
+
 async function handleUpdate(update, env) {
     const message = update?.message;
     if (!message?.chat?.id || !message?.from?.id || !message?.message_id) return;
@@ -104,8 +115,6 @@ async function handleUpdate(update, env) {
 
     if (!hasSupportedImage(message)) return;
 
-    await initDb(env);
-
     if (message.media_group_id) {
         await queueAlbumMessage(message, env);
         return;
@@ -115,9 +124,8 @@ async function handleUpdate(update, env) {
     if (!(await claimMessage(env, messageKey))) return;
 
     try {
-        const image = await uploadTelegramMessageToLsky(env, message);
-        const shortUrl = await createShortUrl(env, image.url);
-        await sendTelegramText(env, chatId, toTelegramCodeBlock(toMarkdownImage(shortUrl, image.filename)), messageId, "HTML");
+        const image = await uploadAndShorten(env, message);
+        await sendTelegramText(env, chatId, toTelegramCodeBlock(toMarkdownImage(image.shortUrl, image.filename)), messageId, "HTML");
     } catch (error) {
         console.error("single upload failed", safeError(error));
         await sendTelegramText(env, chatId, `上传失败：${userFacingError(error)}`, messageId);
@@ -129,68 +137,63 @@ async function queueAlbumMessage(message, env) {
     const now = Date.now();
     const maxQueueImages = getMaxUploadQueueImages(env);
 
-    await env.DB.prepare(`
+    const results = await withDbSchema(env, () => env.DB.batch([
+        env.DB.prepare(`
     INSERT INTO album_groups (group_key, chat_id, reply_to, status, updated_at)
     VALUES (?, ?, ?, 'collecting', ?)
     ON CONFLICT(group_key) DO UPDATE SET
-      updated_at = excluded.updated_at,
-      status = CASE WHEN album_groups.status = 'processing' THEN album_groups.status ELSE 'collecting' END
-  `).bind(groupKey, String(message.chat.id), message.message_id, now).run();
+      updated_at = MAX(album_groups.updated_at, excluded.updated_at),
+      reply_to = MIN(album_groups.reply_to, excluded.reply_to)
+    WHERE album_groups.status = 'collecting'
+      AND NOT EXISTS (SELECT 1 FROM album_messages WHERE group_key = ? AND message_id = ?)
+      AND (SELECT COUNT(*) FROM album_messages WHERE group_key = ?) < ?
+  `).bind(groupKey, String(message.chat.id), message.message_id, now, groupKey, message.message_id, groupKey, maxQueueImages),
+        env.DB.prepare(`
+    INSERT OR IGNORE INTO album_messages (group_key, message_id, payload)
+    SELECT ?, ?, ?
+    WHERE (SELECT COUNT(*) FROM album_messages WHERE group_key = ?) < ?
+      AND EXISTS (SELECT 1 FROM album_groups WHERE group_key = ? AND status = 'collecting')
+  `).bind(groupKey, message.message_id, JSON.stringify(message), groupKey, maxQueueImages, groupKey),
+    ]));
 
-    const existing = await env.DB.prepare(`
-    SELECT 1 FROM album_messages WHERE group_key = ? AND message_id = ?
-  `).bind(groupKey, message.message_id).first();
-    if (existing) return;
-
-    const count = await env.DB.prepare(`
-    SELECT COUNT(*) AS count FROM album_messages WHERE group_key = ?
-  `).bind(groupKey).first();
-
-    if (Number(count?.count || 0) >= maxQueueImages) {
-        await sendTelegramText(env, message.chat.id, `相册队列已满，最多 ${maxQueueImages} 张。`, message.message_id);
+    if (results[1].meta?.changes !== 1) {
+        const existing = await env.DB.prepare(`
+      SELECT 1 FROM album_messages WHERE group_key = ? AND message_id = ?
+    `).bind(groupKey, message.message_id).first();
+        if (!existing) {
+            await sendTelegramText(env, message.chat.id, `相册已开始处理或队列已满（最多 ${maxQueueImages} 张），请重新发送这张图片。`, message.message_id);
+        }
         return;
     }
 
-    await env.DB.prepare(`
-    INSERT INTO album_messages (group_key, message_id, payload) VALUES (?, ?, ?)
-  `).bind(groupKey, message.message_id, JSON.stringify(message)).run();
-
-    await sleep((getAlbumWaitSeconds(env) + 1) * 1000);
+    await sleep(getAlbumWaitSeconds(env) * 1000);
     await processAlbum(env, groupKey);
 }
 
 async function processAlbum(env, groupKey) {
     const group = await env.DB.prepare(`
-    SELECT * FROM album_groups WHERE group_key = ?
-  `).bind(groupKey).first();
-    if (!group || group.status !== "collecting") return;
-
-    if (Date.now() - Number(group.updated_at) < getAlbumWaitSeconds(env) * 1000) return;
-
-    const lock = await env.DB.prepare(`
     UPDATE album_groups SET status = 'processing'
-    WHERE group_key = ? AND status = 'collecting' AND updated_at = ?
-  `).bind(groupKey, group.updated_at).run();
-    if (lock.meta?.changes !== 1) return;
+    WHERE group_key = ? AND status = 'collecting' AND updated_at <= ?
+    RETURNING *
+  `).bind(groupKey, Date.now() - getAlbumWaitSeconds(env) * 1000).first();
+    if (!group) return;
 
     const rows = await env.DB.prepare(`
     SELECT message_id, payload FROM album_messages
     WHERE group_key = ? ORDER BY message_id ASC
   `).bind(groupKey).all();
 
-    const images = [];
-    const errors = [];
-    for (const [index, row] of rows.results.entries()) {
+    const results = await mapWithConcurrency(rows.results, getUploadConcurrency(env), async (row, index) => {
         try {
             const message = JSON.parse(row.payload);
-            const image = await uploadTelegramMessageToLsky(env, message);
-            const shortUrl = await createShortUrl(env, image.url);
-            images.push({ ...image, shortUrl });
+            return { image: await uploadAndShorten(env, message) };
         } catch (error) {
             console.error("album upload failed", { groupKey, index, error: safeError(error) });
-            errors.push(`${index + 1}. ${userFacingError(error)}`);
+            return { error: `${index + 1}. ${userFacingError(error)}` };
         }
-    }
+    });
+    const images = results.filter((result) => result.image).map((result) => result.image);
+    const errors = results.filter((result) => result.error).map((result) => result.error);
 
     let output = images.length
         ? `上传完成：\n\n${images.map((image, index) => `${index + 1}.\n${toTelegramCodeBlock(toMarkdownImage(image.shortUrl, image.filename))}`).join("\n")}`
@@ -208,37 +211,74 @@ async function processAlbum(env, groupKey) {
 }
 
 async function claimMessage(env, messageKey) {
-    const result = await env.DB.prepare(`
+    const result = await withDbSchema(env, () => env.DB.prepare(`
     INSERT OR IGNORE INTO processed_messages (message_key, created_at) VALUES (?, ?)
-  `).bind(messageKey, Date.now()).run();
+  `).bind(messageKey, Date.now()).run());
     return result.meta?.changes === 1;
 }
 
-async function uploadTelegramMessageToLsky(env, message) {
+async function mapWithConcurrency(items, concurrency, callback) {
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+        while (nextIndex < items.length) {
+            const index = nextIndex++;
+            results[index] = await callback(items[index], index);
+        }
+    }));
+    return results;
+}
+
+async function uploadAndShorten(env, message) {
+    const startedAt = Date.now();
+    const timings = {};
+    const image = await uploadTelegramMessageToLsky(env, message, timings);
+    const shortenStartedAt = Date.now();
+    const shortUrl = await createShortUrl(env, image.url);
+    if (env.LOG_UPLOAD_TIMINGS === "true") {
+        console.info("upload timings", {
+            messageId: message.message_id,
+            ...timings,
+            shortenMs: Date.now() - shortenStartedAt,
+            totalMs: Date.now() - startedAt,
+        });
+    }
+    return { ...image, shortUrl };
+}
+
+async function uploadTelegramMessageToLsky(env, message, timings = {}) {
     const image = extractImage(message, env);
+    const getFileStartedAt = Date.now();
     const fileInfo = await telegramApi(env, "getFile", { file_id: image.fileId });
+    timings.getFileMs = Date.now() - getFileStartedAt;
     if (!fileInfo?.file_path) throw new Error("Telegram 未返回文件路径");
 
     const fileUrl = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${fileInfo.file_path}`;
+    const downloadStartedAt = Date.now();
     const fileResponse = await fetchWithTimeout(fileUrl, {}, getRequestTimeoutMs(env));
     if (!fileResponse.ok || !fileResponse.body) {
+        await fileResponse.body?.cancel();
         throw new Error(`下载 Telegram 文件失败 (${fileResponse.status})`);
     }
 
     const contentLength = Number(fileResponse.headers.get("content-length") || 0);
     const maxBytes = getMaxFileMb(env) * 1024 * 1024;
     if (contentLength && contentLength > maxBytes) {
+        await fileResponse.body.cancel();
         throw new Error(`文件超过 ${getMaxFileMb(env)} MB`);
     }
 
     // Cloudflare Workers 的 multipart FormData 需要 Blob/File；默认限制保持保守，避免大文件占满 Worker 内存。
     const fileBlob = await fileResponse.blob();
+    timings.downloadMs = Date.now() - downloadStartedAt;
     if (fileBlob.size > maxBytes) {
         throw new Error(`文件超过 ${getMaxFileMb(env)} MB`);
     }
 
     const filename = image.filename || guessFilename(fileInfo.file_path, image.mimeType);
+    const uploadStartedAt = Date.now();
     const url = await uploadToLsky(env, fileBlob, filename, image.mimeType);
+    timings.uploadMs = Date.now() - uploadStartedAt;
     return { url, filename };
 }
 
@@ -423,6 +463,13 @@ function getMaxUploadQueueImages(env) {
 function getAlbumWaitSeconds(env) {
     const value = Number(env.ALBUM_WAIT_SECONDS || DEFAULT_ALBUM_WAIT_SECONDS);
     return Number.isFinite(value) && value >= 2 ? value : DEFAULT_ALBUM_WAIT_SECONDS;
+}
+
+function getUploadConcurrency(env) {
+    const value = Number(env.UPLOAD_CONCURRENCY || DEFAULT_UPLOAD_CONCURRENCY);
+    const requested = Number.isFinite(value) && value >= 1 ? Math.floor(value) : DEFAULT_UPLOAD_CONCURRENCY;
+    const memoryLimit = Math.max(1, Math.floor(UPLOAD_BUFFER_BUDGET_MB / getMaxFileMb(env)));
+    return Math.min(requested, memoryLimit, 4);
 }
 
 function getRequestTimeoutMs(env) {

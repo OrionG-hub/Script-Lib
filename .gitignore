@@ -143,3 +143,6 @@ docker-compose.override.yml
 *.pem
 *.crt
 *.key
+
+# Local-only private Cloudflare Worker source
+/.private-gitea-raw-worker.js
