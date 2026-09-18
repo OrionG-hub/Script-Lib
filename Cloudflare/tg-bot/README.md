@@ -40,6 +40,7 @@ yi'xia# Telegram Bot Worker
 ### 消息转发
 - 私聊用户消息转发到管理员群论坛 topic
 - 每个用户自动创建独立 topic，并推送用户身份卡片
+- 资料卡和 `/card` 刷新均原位编辑；仅在没有卡片或 Telegram 确认原卡已删除时补建。首次建卡使用 D1 锁，避免并发消息重复建卡，普通资料更新不会覆盖已保存的卡片 ID。
 - 管理员在对应 topic 内回复，即可把消息复制回用户私聊
 - 支持消息引用关系保持（用户和管理员均可引用回复）
 
@@ -80,6 +81,8 @@ yi'xia# Telegram Bot Worker
 - Telegram Bot Token
 - 启用话题的 Telegram 管理群
 - 可选：Cloudflare Turnstile 或 Google reCAPTCHA 密钥
+
+本地回归测试使用 Node.js 22.13+，在本目录运行 `npm test`，`npm run test:integration` 单独运行 Webhook 集成测试，`npm run test:coverage` 检查 Worker 覆盖率。测试通过 SQLite 模拟 D1 的原子更新，Telegram API 使用模拟响应，不会发送真实消息。部署后脚本自动补充资料卡锁字段；历史重复卡片不会自动删除。
 
 ## 必需环境变量
 

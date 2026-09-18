@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "test": "node --test tests/*.test.cjs",
+    "test:integration": "node --test --test-name-pattern=integration tests/*.test.cjs",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include=worker.js tests/*.test.cjs",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"
   },
