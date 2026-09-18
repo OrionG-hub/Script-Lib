@@ -8,6 +8,32 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+readonly TELEBOX_RUNTIME_IMAGE="telebox-runtime:node20-v1"
+
+ensure_runtime_image() {
+    if [[ "${TELEBOX_REBUILD_IMAGE:-0}" != "1" ]] && docker image inspect "$TELEBOX_RUNTIME_IMAGE" >/dev/null 2>&1; then
+        echo "复用运行镜像: $TELEBOX_RUNTIME_IMAGE"
+        return
+    fi
+
+    echo "构建运行镜像（首次安装或显式更新时执行）..."
+    local build_options=(--pull --tag "$TELEBOX_RUNTIME_IMAGE")
+    if [[ "${TELEBOX_REBUILD_IMAGE:-0}" == "1" ]]; then
+        build_options+=(--no-cache)
+    fi
+    docker build "${build_options[@]}" - <<'DOCKERFILE'
+FROM debian:12
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg sudo git build-essential python3 ffmpeg pkg-config libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x -o /tmp/setup-node.sh \
+    && bash /tmp/setup-node.sh \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g pm2 \
+    && rm -f /tmp/setup-node.sh \
+    && rm -rf /var/lib/apt/lists/*
+DOCKERFILE
+}
+
 # Docker Compose 兼容函数
 docker_compose_wrapper() {
     if command -v docker-compose >> /dev/null 2>&1; then
@@ -46,7 +72,11 @@ list_telebox_containers() {
     echo "=========================================="
 
     # 查找所有容器（包括停止的）
-    containers=$(docker ps -a --format "{{.Names}}" 2>/dev/null)
+    local containers container status status_cn
+    if ! containers=$(docker ps -a --format $'{{.Names}}\t{{.State}}' 2>/dev/null); then
+        echo "无法读取 Docker 容器状态"
+        return 1
+    fi
 
     if [ -z "$containers" ]; then
         echo "未找到任何容器"
@@ -54,8 +84,7 @@ list_telebox_containers() {
         echo
         echo "容器名称          状态"
         echo "----------------------------------------"
-        while IFS= read -r container; do
-            status=$(docker inspect -f '{{.State.Status}}' "$container" 2>/dev/null)
+        while IFS=$'\t' read -r container status; do
             case $status in
                 running)
                     status_cn="运行中"
@@ -198,6 +227,7 @@ get_telegram_config() {
 }
 
 build_compose_env() {
+    ensure_runtime_image || return $?
     while true; do
         printf "请输入 TeleBox 容器的名称（仅限字母和数字）[默认: telebox]: "
         read -r container_name <&1
@@ -238,25 +268,12 @@ version: '3.8'
 
 services:
   telebox:
-    image: debian:12
+    image: $TELEBOX_RUNTIME_IMAGE
     container_name: \${CONTAINER_NAME:-telebox}
     restart: unless-stopped
     volumes:
       - "/root/Docker_Telebox/\${CONTAINER_NAME:-telebox}:/root"
-    pull_policy: always
-    command: >
-      bash -lc "set -e;
-      apt-get update;
-      apt-get install -y curl ca-certificates gnupg sudo;
-      update-ca-certificates;
-      curl -fsSL https://deb.nodesource.com/setup_20.x | bash -;
-      apt-get install -y nodejs;
-      npm i -g pm2;
-      [ -f /root/telebox/ecosystem.config.js ] ||
-      (curl -fsSL https://github.com/EAlyce/conf/raw/refs/heads/main/Linux/installTeleBox.sh -o /root/installTeleBox.sh;
-      chmod +x /root/installTeleBox.sh;
-      /root/installTeleBox.sh);
-      exec pm2-runtime /root/telebox/ecosystem.config.js"
+    command: ["pm2-runtime", "/root/telebox/ecosystem.config.js"]
 EOF
 
     echo "数据目录: $data_dir"
@@ -286,15 +303,10 @@ start_compose_interactive() {
 
     # 第一步：交互式安装
     docker_compose_wrapper -f "$temp_dir/docker-compose.yml" run --rm --name "$container_name" telebox bash -lc "set -e; \
-        apt-get update; \
-        apt-get install -y curl ca-certificates gnupg sudo; \
-        update-ca-certificates; \
-        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
-        apt-get install -y nodejs; \
-        npm i -g pm2; \
         curl -fsSL https://github.com/EAlyce/conf/raw/refs/heads/main/Linux/installTeleBox.sh -o /root/installTeleBox.sh; \
         chmod +x /root/installTeleBox.sh; \
         /root/installTeleBox.sh; \
+        test -f /root/telebox/ecosystem.config.js; \
         echo ''; \
         echo '安装完成，正在保存 PM2 配置...'; \
         pm2 ls; \
@@ -343,8 +355,8 @@ start_installation() {
     welcome
     docker_check
     access_check
-    build_compose_env
-    start_compose_interactive
+    build_compose_env || return $?
+    start_compose_interactive || return $?
     start_compose_daemon
 }
 
@@ -695,7 +707,9 @@ show_container_info() {
         fi
     done
 
-    if docker inspect "$container_name" &>/dev/null; then
+    local container_info
+    if container_info=$(docker inspect -f $'{{.State.Status}}\t{{.Id}}' "$container_name" 2>/dev/null); then
+        IFS=$'\t' read -r status container_id <<< "$container_info"
         echo
         echo "=========================================="
         echo "  容器信息"
@@ -703,11 +717,10 @@ show_container_info() {
         echo
 
         # 容器状态
-        status=$(docker inspect -f '{{.State.Status}}' "$container_name")
         echo "容器状态: $status"
 
         # 容器 ID
-        container_id=$(docker inspect -f '{{.Id}}' "$container_name" | cut -c1-12)
+        container_id=${container_id:0:12}
         echo "容器 ID: $container_id"
 
         # 数据目录
@@ -960,4 +973,10 @@ show_menu() {
 }
 
 # 主程序入口
-show_menu
+if [[ "${1:-}" == "build-runtime" ]]; then
+    docker_check
+    access_check
+    ensure_runtime_image
+else
+    show_menu
+fi

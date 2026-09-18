@@ -19,6 +19,8 @@ readonly C_NC='\033[0m'
 INSTANCE_NAME=""
 APP_DIR=""
 PM2_NAME=""
+declare -A PM2_STATES=()
+PM2_QUERY_STATE="not-queried"
 
 log_info()  { echo -e "${C_GREEN}[INFO] $1${C_NC}"; }
 log_warn()  { echo -e "${C_YELLOW}[WARN] $1${C_NC}"; }
@@ -169,25 +171,46 @@ ensure_pm2() {
     fi
 }
 
+load_pm2_states() {
+    PM2_STATES=()
+    if ! command -v pm2 >/dev/null 2>&1; then
+        PM2_QUERY_STATE="pm2-not-installed"
+        return
+    fi
+
+    local states name state
+    if ! states=$(pm2 jlist 2>/dev/null | node -e '
+const fs = require("node:fs");
+const entries = JSON.parse(fs.readFileSync(0, "utf8"));
+const states = new Map();
+for (const entry of entries) {
+    if (typeof entry.name !== "string" || /[\t\r\n]/.test(entry.name)) continue;
+    const running = Number.isInteger(entry.pid) && entry.pid > 0;
+    if (running || !states.has(entry.name)) {
+        states.set(entry.name, running ? `running(pid:${entry.pid})` : "stopped");
+    }
+}
+for (const [name, state] of states) console.log(`${name}\t${state}`);
+'); then
+        PM2_QUERY_STATE="unavailable"
+        return
+    fi
+
+    while IFS=$'\t' read -r name state; do
+        [[ -n "$name" ]] && PM2_STATES["$name"]=$state
+    done <<< "$states"
+    PM2_QUERY_STATE="ready"
+}
+
 pm2_state() {
     local name=$1
-    local pid
-
-    if ! command -v pm2 >/dev/null 2>&1; then
-        echo "pm2-not-installed"
-        return
+    if [[ "${2:-}" != "snapshot" ]]; then
+        load_pm2_states
     fi
-
-    if ! pm2 describe "$name" >/dev/null 2>&1; then
-        echo "not-registered"
-        return
-    fi
-
-    pid=$(pm2 pid "$name" 2>/dev/null | tail -n 1 || true)
-    if [[ "$pid" =~ ^[0-9]+$ ]] && ((pid > 0)); then
-        echo "running(pid:$pid)"
+    if [[ "$PM2_QUERY_STATE" == "ready" ]]; then
+        echo "${PM2_STATES[$name]:-not-registered}"
     else
-        echo "stopped"
+        echo "$PM2_QUERY_STATE"
     fi
 }
 
@@ -229,10 +252,11 @@ generate_instance_name() {
 print_instance_row() {
     local name=$1
     set_instance "$name"
-    printf "%-18s %-42s %-24s %s\n" "$INSTANCE_NAME" "$APP_DIR" "$(repo_status)" "$(pm2_state "$PM2_NAME")"
+    printf "%-18s %-42s %-24s %s\n" "$INSTANCE_NAME" "$APP_DIR" "$(repo_status)" "$(pm2_state "$PM2_NAME" snapshot)"
 }
 
 list_instances() {
+    load_pm2_states
     log_step "本机 TeleBox 状态"
     printf "%-18s %-42s %-24s %s\n" "INSTANCE" "DIR" "REPO" "PM2"
     printf "%-18s %-42s %-24s %s\n" "--------" "---" "----" "---"
@@ -301,17 +325,55 @@ ensure_app_repo() {
     fi
 }
 
+node_deps_fingerprint() {
+    local npm_version
+    npm_version=$(npm --version) || return $?
+    node - "$npm_version" <<'NODE'
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const os = require("node:os");
+const path = require("node:path");
+const hash = crypto.createHash("sha256");
+hash.update(JSON.stringify(["v1", process.version, process.versions.modules, process.platform, process.arch, process.argv[2]]));
+const userConfig = process.env.npm_config_userconfig || process.env.NPM_CONFIG_USERCONFIG || path.join(os.homedir(), ".npmrc");
+for (const file of ["package.json", "package-lock.json", "npm-shrinkwrap.json", ".npmrc", userConfig]) {
+    hash.update(JSON.stringify([file, fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null]));
+}
+for (const key of Object.keys(process.env).filter((key) => /^npm_config_/i.test(key) || key === "NODE_ENV").sort()) {
+    hash.update(JSON.stringify([key, process.env[key]]));
+}
+console.log(hash.digest("hex"));
+NODE
+}
+
 install_node_deps() {
+    local force=${1:-false}
     log_step "项目依赖安装"
     cd "$APP_DIR"
 
-    if [[ -f package-lock.json ]]; then
-        log_info "检测到 package-lock.json，使用 npm ci 进行可复现安装..."
-        npm ci --prefer-offline --no-audit
+    local fingerprint stamp="node_modules/.telebox-deps-fingerprint"
+    fingerprint=$(node_deps_fingerprint) || return $?
+    if [[ "$force" != "true" && -f "$stamp" && "$(< "$stamp")" == "$fingerprint" ]]; then
+        log_info "依赖和运行环境未变化，跳过安装。"
+        return
+    fi
+
+    stop_instance
+    rm -f "$stamp"
+    if [[ "$force" == "true" ]]; then
+        rm -rf node_modules
+    fi
+
+    if [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then
+        log_info "检测到依赖锁文件，使用 npm ci 进行可复现安装..."
+        npm ci --prefer-offline --no-audit || return $?
     else
         log_warn "未检测到 package-lock.json，回退到 npm install。"
-        npm install --prefer-offline --no-audit
+        npm install --prefer-offline --no-audit || return $?
     fi
+    fingerprint=$(node_deps_fingerprint) || return $?
+    mkdir -p node_modules
+    printf '%s\n' "$fingerprint" > "$stamp"
 }
 
 refresh_node_deps() {
@@ -325,14 +387,10 @@ refresh_node_deps() {
     ensure_app_repo
 
     cd "$APP_DIR"
-    log_warn "即将停止实例并重新安装 node_modules。"
-    stop_instance
-
-    log_info "清理旧依赖目录和 npm 缓存..."
-    rm -rf node_modules
+    log_info "校验 npm 缓存并强制重装依赖..."
     npm cache verify
 
-    install_node_deps
+    install_node_deps true
     start_instance
 }
 
@@ -521,8 +579,9 @@ switch_login() {
         exit 1
     fi
 
-    install_system_deps
-    ensure_app_repo
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        install_system_deps
+    fi
     install_node_deps
     stop_instance
     clear_login_config

@@ -108,8 +108,10 @@ async function loadRenameUtils() {
 }
 
 const normalizeRegionCode = regionCode => regionCode === 'GB' ? 'UK' : regionCode;
+const regionResolverCache = new WeakMap();
 
 const createRegionResolver = utils => {
+    if (regionResolverCache.has(utils)) return regionResolverCache.get(utils);
     // 静态别名覆盖常见缩写和中英文名称；Intl 补充运行环境支持的地区名。
     const aliases = [];
     const seenAliases = Object.create(null);
@@ -145,42 +147,52 @@ const createRegionResolver = utils => {
         });
     }
 
-    const compiledAliases = aliases.map(([alias, regionCode]) => {
-        const escapedAlias = utils.escapeRegex(alias);
-        const usesLatinBoundary = /^[A-Za-z0-9].*[A-Za-z0-9]$/.test(alias);
+    const orderedAliases = aliases.map(([alias, regionCode], order) => ({
+        alias,
+        aliasLength: alias.length,
+        regionCode,
+        order,
+        usesLatinBoundary: /^[A-Za-z0-9].*[A-Za-z0-9]$/.test(alias)
+    })).sort((first, second) => second.aliasLength - first.aliasLength || first.order - second.order);
+    const compiledGroups = [true, false].map(usesLatinBoundary => {
+        const items = orderedAliases.filter(item => item.usesLatinBoundary === usesLatinBoundary);
+        if (!items.length) return null;
+        const alternatives = items.map(item => `(${utils.escapeRegex(item.alias)})`).join('|');
         return {
-            aliasLength: alias.length,
-            regionCode,
-            regex: usesLatinBoundary
-                ? new RegExp(`(^|[^A-Za-z])(${escapedAlias})(?=$|[^A-Za-z])`, 'i')
-                : new RegExp(`(${escapedAlias})`, 'i')
+            items,
+            firstCapture: usesLatinBoundary ? 2 : 1,
+            regex: new RegExp(usesLatinBoundary
+                ? `(^|[^A-Za-z])(?:${alternatives})(?=$|[^A-Za-z])`
+                : `(?:${alternatives})`, 'i')
         };
-    });
+    }).filter(Boolean);
     const regionCodeRegex = new RegExp(
         `(^|[^A-Za-z])(${[...ISO_REGION_CODES, 'UK'].join('|')})(?=$|[^A-Za-z])`,
         'g'
     );
 
-    return (name, leadingFlag) => {
+    const resolve = (name, leadingFlag) => {
         const cleanName = String(name || '');
         let bestMatch = null;
-        const consider = (index, aliasLength, regionCode) => {
+        const consider = (index, aliasLength, regionCode, order = aliases.length) => {
             if (
                 !bestMatch ||
                 index < bestMatch.index ||
-                (index === bestMatch.index && aliasLength > bestMatch.aliasLength)
+                (index === bestMatch.index && aliasLength > bestMatch.aliasLength) ||
+                (index === bestMatch.index && aliasLength === bestMatch.aliasLength && order < bestMatch.order)
             ) {
-                bestMatch = { index, aliasLength, regionCode: normalizeRegionCode(regionCode) };
+                bestMatch = { index, aliasLength, order, regionCode: normalizeRegionCode(regionCode) };
             }
         };
 
-        compiledAliases.forEach(item => {
-            const match = cleanName.match(item.regex);
+        compiledGroups.forEach(group => {
+            const match = cleanName.match(group.regex);
             if (!match) return;
 
-            const aliasText = match[2] || match[1] || match[0];
-            const prefixLength = match[2] ? match[0].length - aliasText.length : 0;
-            consider(match.index + prefixLength, item.aliasLength, item.regionCode);
+            const itemIndex = group.items.findIndex((item, index) => match[index + group.firstCapture] !== undefined);
+            const item = group.items[itemIndex];
+            const prefixLength = group.firstCapture === 2 ? match[1].length : 0;
+            consider(match.index + prefixLength, item.aliasLength, item.regionCode, item.order);
         });
 
         regionCodeRegex.lastIndex = 0;
@@ -195,6 +207,8 @@ const createRegionResolver = utils => {
         if (bestMatch) return bestMatch.regionCode;
         return normalizeRegionCode(utils.flagToRegionCode(leadingFlag));
     };
+    regionResolverCache.set(utils, resolve);
+    return resolve;
 };
 
 const multiplierOf = name => {
