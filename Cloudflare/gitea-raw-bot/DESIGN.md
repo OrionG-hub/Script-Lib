@@ -4,6 +4,7 @@
 - 独立 Worker 小项目，部署目录 Cloudflare/gitea-raw-bot，连接 Git 后提交自动部署。
 - Telegram 私聊白名单用户发送 Gitea 文件页面或 Raw 链接，保留分支并通过 Shlink 返回短链。
 - 兼容 /{repository}/{path}，非默认分支使用 ref 查询参数。
+- Bot 同时接受配置的 Raw 代理域名；统一目标编码、默认分支和私库 Token，与 Gitea 原链接复用 Shlink 短链。
 - 私库沿用 TOKEN，自动写入 Shlink 的 Raw 目标地址；Bot 直接返回可用短链。公开仓库不附加 TOKEN。
 - 无需数据库；上游请求超时，禁止跟随带凭据的上游重定向。
 

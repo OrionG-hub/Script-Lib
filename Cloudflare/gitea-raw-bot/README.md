@@ -12,9 +12,13 @@ https://git.example.com/owner/repository/src/branch/feature/foo/config.yaml
 https://git.example.com/owner/repository/raw/branch/main/config.yaml
 https://git.example.com/owner/repository/src/tag/v1.0/config.yaml
 https://git.example.com/owner/repository/src/commit/abc1234/config.yaml
+https://raw.example.com/repository/config.yaml
+https://raw.example.com/repository/config.yaml?ref=feature%2Ffoo
 ```
 
 Bot 返回 `https://go.example.com/abc12`。短码由 Shlink 生成，长度沿用 Shlink 配置；相同目标使用 `findIfExists` 请求复用。
+
+Gitea 原链接与对应的 Cloudflare Raw 代理链接会使用相同目标，复用已有短链；没有记录时才创建。代理链接保留 `ref`，默认分支的显式 `ref` 会省略，输入中的 Token、其他查询参数和片段不沿用；私库统一使用配置中的 TOKEN。
 
 - 默认分支：`https://raw.example.com/repository/config.yaml`。
 - 其他分支：`https://raw.example.com/repository/config.yaml?ref=feature%2Ffoo`。

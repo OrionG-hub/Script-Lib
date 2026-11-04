@@ -1,7 +1,7 @@
 import { HttpError, reply, required, httpsBase, config, segments, allowed, apiRoot, upstream, readJson, safeEqual, rawLink } from './common.js';
 import { repositoryInfo, giteaHeaders } from './raw.js';
 
-const HELP = '发送一个 Gitea 文件链接（src/branch、raw/branch、src/tag 或 src/commit），返回保留版本的 Shlink 短链。私库短链自动携带 Raw Token，可直接访问。';
+const HELP = '发送一个 Gitea 文件链接或 Cloudflare Raw 代理链接，返回保留版本的 Shlink 短链；相同目标复用已有短链。私库短链自动携带 Raw Token，可直接访问。';
 async function send(env, chatId, messageId, text) {
     const token = required(env, 'TELEGRAM_BOT_TOKEN');
     const response = await upstream(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -11,15 +11,31 @@ async function send(env, chatId, messageId, text) {
     });
     if (!response.ok || !(await readJson(response, 'Telegram')).ok) throw new HttpError('Telegram reply failed.', 502);
 }
+function convertedLink(env, repo, file, ref, defaultBranch, requiresAuth) {
+    const target = new URL(rawLink(env, repo, file, ref, defaultBranch));
+    if (requiresAuth) target.searchParams.set('token', required(env, 'TOKEN'));
+    return { longUrl: target.href, private: requiresAuth };
+}
 export async function convert(input, env) {
-    // A URL only, not arbitrary text; query strings (including tokens) are never reused.
-    if (typeof input !== 'string' || /\s/.test(input.trim())) throw new HttpError('请单独发送一个 Gitea 文件链接。');
+    // Accept only a URL. Proxy links preserve ref; supplied tokens are never reused.
+    if (typeof input !== 'string' || /\s/.test(input.trim())) throw new HttpError('请单独发送一个 Gitea 或 Raw 代理文件链接。');
     let url;
-    try { url = new URL(input.trim()); } catch { throw new HttpError('请发送有效的 Gitea 文件链接。'); }
+    try { url = new URL(input.trim()); } catch { throw new HttpError('请发送有效的 Gitea 或 Raw 代理文件链接。'); }
     const cfg = config(env);
+    if (url.username || url.password) throw new HttpError('链接不能包含用户名或密码。');
+    const rawBase = new URL(httpsBase(required(env, 'RAW_BASE_URL')));
+    if (url.origin === rawBase.origin) {
+        const [repo, ...files] = segments(url.pathname);
+        if (!files.length) throw new HttpError('请发送包含仓库和文件路径的 Raw 代理链接。');
+        allowed(cfg, repo);
+        const info = await repositoryInfo(cfg, repo, env);
+        const ref = url.searchParams.get('ref') ?? info.defaultBranch;
+        if (!ref || ref.length > 1024 || /[\x00-\x1f\x7f]/.test(ref)) throw new HttpError('无效的 ref。');
+        return convertedLink(env, repo, files.join('/'), ref, info.defaultBranch, info.requiresAuth);
+    }
     const base = new URL(cfg.base);
     const prefix = base.pathname.replace(/\/$/, '');
-    if (url.origin !== base.origin || url.username || url.password || !url.pathname.startsWith(`${prefix}/`)) throw new HttpError('仅支持配置的 Gitea 站点。');
+    if (url.origin !== base.origin || !url.pathname.startsWith(`${prefix}/`)) throw new HttpError('仅支持配置的 Gitea 或 Raw 代理站点。');
     const [owner, repo, mode, kind, ...tail] = segments(url.pathname.slice(prefix.length));
     if (owner !== cfg.owner) throw new HttpError('仅支持配置的仓库所有者。');
     allowed(cfg, repo);
@@ -44,9 +60,7 @@ export async function convert(input, env) {
         if (!ref) throw new HttpError('找不到对应分支或标签。', 404);
     }
     if (kind === 'tag') ref = `refs/tags/${ref}`;
-    const target = new URL(rawLink(env, repo, file, ref, kind === 'branch' ? info.defaultBranch : null));
-    if (info.requiresAuth) target.searchParams.set('token', required(env, 'TOKEN'));
-    return { longUrl: target.href, private: info.requiresAuth };
+    return convertedLink(env, repo, file, ref, kind === 'branch' ? info.defaultBranch : null, info.requiresAuth);
 }
 export async function shorten(longUrl, env) {
     const base = httpsBase(required(env, 'SHLINK_API_URL'));
