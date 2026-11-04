@@ -9,6 +9,9 @@
 ```text
 .
 ├── Cloudflare/
+│   ├── gitea-raw-bot/
+│   │   ├── README.md
+│   │   └── src/
 │   ├── lskypro-bot/
 │   │   ├── README.md
 │   │   └── lskypro-telegram-worker.js
@@ -35,11 +38,13 @@
 | `Telebox/telebox-docker.sh` | TeleBox Docker Compose 菜单式管理脚本，支持安装、卸载、启停、重装、日志、备份、恢复 | Linux + Docker |
 | `Cloudflare/tg-bot/worker.js` | Telegram 双向客服 Bot 的 Cloudflare Worker 代码，使用 D1 存储配置、用户和消息状态 | Cloudflare Workers |
 | `Cloudflare/lskypro-bot/lskypro-telegram-worker.js` | Telegram 图片上传 Bot 的 Cloudflare Worker 代码，把图片上传到 Lsky Pro 并返回 Markdown 链接 | Cloudflare Workers |
+| `Cloudflare/gitea-raw-bot/src/index.js` | Gitea Raw 代理与 Telegram 链接转换，通过 Shlink 返回短链 | Cloudflare Workers |
 
 各目录的详细说明：
 
 - `Homebrew/README.md`
 - `Telebox/README.md`
+- `Cloudflare/gitea-raw-bot/README.md`
 - `Cloudflare/tg-bot/README.md`
 - `Cloudflare/lskypro-bot/README.md`
 

@@ -1,0 +1,13 @@
+# Copy to .dev.vars for local testing. Never commit real credentials.
+GITEA_URL="https://git.example.com"
+GITEA_OWNER="your-owner"
+ALLOWED_REPOSITORIES='["your-repository"]'
+RAW_BASE_URL="https://raw.example.com"
+ALLOWED_TELEGRAM_USER_IDS="123456789"
+SHLINK_API_URL="https://go.example.com"
+
+TOKEN="replace-with-your-existing-raw-token"
+GITEA_TOKEN="replace-with-read-only-gitea-token"
+TELEGRAM_BOT_TOKEN="replace-with-botfather-token"
+TELEGRAM_WEBHOOK_SECRET="replace-with-random-webhook-secret"
+SHLINK_API_KEY="replace-with-shlink-api-key"

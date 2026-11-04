@@ -1,0 +1,16 @@
+{
+  "name": "gitea-raw-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "wrangler deploy --dry-run",
+    "test": "node --test tests/unit.test.js",
+    "test:integration": "node --test tests/integration.test.js",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-include='src/*.js' --test-coverage-lines=85 --test-coverage-functions=90 --test-coverage-branches=75 tests/*.test.js"
+  },
+  "devDependencies": { "wrangler": "^4.108.0" }
+}

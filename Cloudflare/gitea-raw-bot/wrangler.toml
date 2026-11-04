@@ -1,0 +1,16 @@
+name = "gitea-raw-bot"
+main = "src/index.js"
+compatibility_date = "2026-11-04"
+# Preserve variables configured in the Cloudflare dashboard on Git deployments.
+keep_vars = true
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# Configure deployment-specific variables in the dashboard. See .dev.vars.example.
+# No KV / D1 / R2 bindings are required.
+
+[observability.logs]
+enabled = true
+invocation_logs = false
