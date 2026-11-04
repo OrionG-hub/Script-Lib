@@ -46,7 +46,13 @@ export function apiRoot(cfg, repo) {
 }
 export async function upstream(url, options = {}) {
     try {
-        return await fetch(url, { ...options, redirect: 'error', signal: AbortSignal.timeout(15000) });
+        // Workers supports only follow/manual; reject redirects before forwarding credentials.
+        const response = await fetch(url, { ...options, redirect: 'manual', signal: AbortSignal.timeout(15000) });
+        if (response.status >= 300 && response.status < 400) {
+            await response.body?.cancel();
+            throw new Error('Upstream redirect rejected.');
+        }
+        return response;
     } catch { throw new HttpError('Upstream request failed or timed out.', 502); }
 }
 export async function readJson(response, service) {
