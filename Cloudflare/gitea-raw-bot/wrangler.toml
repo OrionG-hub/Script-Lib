@@ -1,4 +1,5 @@
-name = "gitea-raw-bot"
+
+name = "gitea-raw"
 main = "src/index.js"
 compatibility_date = "2026-11-04"
 # Preserve variables configured in the Cloudflare dashboard on Git deployments.
@@ -8,9 +9,14 @@ keep_vars = true
 enabled = true
 head_sampling_rate = 1
 
-# Configure deployment-specific variables in the dashboard. See .dev.vars.example.
+# Configure secrets and additional deployment-specific variables in the dashboard.
 # No KV / D1 / R2 bindings are required.
 
 [observability.logs]
 enabled = true
 invocation_logs = false
+
+[vars]
+GITEA_URL = "https://git.orionc.me"
+GITEA_OWNER = "orion"
+ALLOWED_REPOSITORIES = '["proxy","one-two_bubu_Ordering_System","ProxyConfSupport","RuleListSupport","script","filecodebox","FileCodeBoxFronted2026","FileCodeBoxFronted","FileCodeBoxFronted2023","plugin"]'
