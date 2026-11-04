@@ -19,4 +19,7 @@ invocation_logs = false
 [vars]
 GITEA_URL = "https://git.orionc.me"
 GITEA_OWNER = "orion"
+RAW_BASE_URL = "https://raw.orionc.me"
+ALLOWED_TELEGRAM_USER_IDS = "313208759"
+SHLINK_API_URL = "https://go.orionc.me"
 ALLOWED_REPOSITORIES = '["proxy","one-two_bubu_Ordering_System","ProxyConfSupport","RuleListSupport","script","filecodebox","FileCodeBoxFronted2026","FileCodeBoxFronted","FileCodeBoxFronted2023","plugin"]'
