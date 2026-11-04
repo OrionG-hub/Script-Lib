@@ -1,7 +1,7 @@
 import { HttpError, reply, required, httpsBase, config, segments, allowed, apiRoot, upstream, readJson, safeEqual, rawLink } from './common.js';
 import { repositoryInfo, giteaHeaders } from './raw.js';
 
-const HELP = '发送一个 Gitea 文件链接或 Cloudflare Raw 代理链接，返回保留版本的 Shlink 短链；相同目标复用已有短链。私库短链自动携带 Raw Token，可直接访问。';
+const HELP = '发送一个 Gitea 文件链接或 Cloudflare Raw 代理链接，使用不带扩展名的文件名生成短链；相同目标复用已有文件名短链。私库自动携带 Raw Token。\n名称被占用时发送：/short 新名称 链接';
 async function send(env, chatId, messageId, text) {
     const token = required(env, 'TELEGRAM_BOT_TOKEN');
     const response = await upstream(`https://api.telegram.org/bot${token}/sendMessage`, {
@@ -62,18 +62,57 @@ export async function convert(input, env) {
     if (kind === 'tag') ref = `refs/tags/${ref}`;
     return convertedLink(env, repo, file, ref, kind === 'branch' ? info.defaultBranch : null, info.requiresAuth);
 }
-export async function shorten(longUrl, env) {
-    const base = httpsBase(required(env, 'SHLINK_API_URL'));
-    const response = await upstream(`${base}/rest/v3/short-urls`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': required(env, 'SHLINK_API_KEY') },
-        body: JSON.stringify({ longUrl, findIfExists: true, crawlable: false, forwardQuery: true, tags: ['gitea-raw'] })
-    });
-    if (!response.ok) throw new HttpError('Shlink 短链生成失败。', 502);
-    const data = await readJson(response, 'Shlink');
+export function shortName(longUrl, requested) {
+    let name = requested;
+    if (name === undefined) {
+        const filename = decodeURIComponent(new URL(longUrl).pathname.split('/').at(-1));
+        const dot = filename.lastIndexOf('.');
+        name = (dot > 0 ? filename.slice(0, dot) : filename).replace(/\s+/gu, '-');
+    }
+    if (typeof name !== 'string' || !/^[\p{L}\p{N}_.-]{1,128}$/u.test(name) || ['.', '..'].includes(name)) {
+        throw new HttpError('短链名称需为 1–128 个中英文、数字、点、下划线或连字符。请发送：/short 新名称 链接');
+    }
+    return name;
+}
+function shortUrl(data) {
     let result;
     try { result = new URL(data.shortUrl); } catch { throw new HttpError('Shlink 未返回有效短链。', 502); }
     if (result.protocol !== 'https:' || result.username || result.password) throw new HttpError('Shlink 未返回有效 HTTPS 短链。', 502);
     return result.href;
+}
+async function existingNamed(longUrl, base, headers) {
+    // The extra tag distinguishes named URLs from legacy random short codes.
+    for (let page = 1; page <= 3; page++) {
+        const query = new URLSearchParams({ searchTerm: longUrl, 'tags[]': 'gitea-raw-named', itemsPerPage: '100', orderBy: 'dateCreated-DESC', page: String(page) });
+        const response = await upstream(`${base}/rest/v3/short-urls?${query}`, { headers });
+        if (!response.ok) throw new HttpError('Shlink 已有短链查询失败。', 502);
+        const data = (await readJson(response, 'Shlink')).shortUrls;
+        if (!Array.isArray(data?.data) || !Number.isInteger(data.pagination?.pagesCount) || data.pagination.pagesCount < 0) throw new HttpError('Shlink 短链查询响应无效。', 502);
+        const found = data.data.find(item => item.longUrl === longUrl);
+        if (found) return shortUrl(found);
+        if (page >= data.pagination.pagesCount) return null;
+    }
+    throw new HttpError('匹配记录过多，请发送：/short 新名称 链接');
+}
+export async function shorten(longUrl, env, requested) {
+    const base = httpsBase(required(env, 'SHLINK_API_URL'));
+    const headers = { 'Content-Type': 'application/json', 'X-Api-Key': required(env, 'SHLINK_API_KEY') };
+    if (requested === undefined) {
+        const existing = await existingNamed(longUrl, base, headers);
+        if (existing) return existing;
+    }
+    const customSlug = shortName(longUrl, requested);
+    const response = await upstream(`${base}/rest/v3/short-urls`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ longUrl, customSlug, findIfExists: true, crawlable: false, forwardQuery: true, tags: ['gitea-raw', 'gitea-raw-named'] })
+    });
+    if ([400, 409].includes(response.status)) {
+        const problem = await readJson(response, 'Shlink');
+        if (problem.type === 'https://shlink.io/api/error/non-unique-slug') throw new HttpError(`短链名称「${customSlug}」已被占用，未修改原链接。请发送：/short 新名称 链接`, 409);
+    }
+    if (!response.ok) throw new HttpError('Shlink 短链生成失败。', 502);
+    const data = await readJson(response, 'Shlink');
+    return shortUrl(data);
 }
 export async function webhook(request, env) {
     if (request.method !== 'POST') return reply('Method Not Allowed', 405);
@@ -89,8 +128,10 @@ export async function webhook(request, env) {
         text = HELP;
     } else {
         try {
-            const link = await convert(message.text, env);
-            text = await shorten(link.longUrl, env);
+            const command = message.text.trim().match(/^\/short(?:@\w+)?\s+(\S+)\s+(\S+)$/u);
+            if (/^\/short(?:@\w+)?(?:\s|$)/u.test(message.text.trim()) && !command) throw new HttpError('用法：/short 新名称 链接');
+            const link = await convert(command ? command[2] : message.text, env);
+            text = await shorten(link.longUrl, env, command?.[1]);
         } catch (error) {
             if (!(error instanceof HttpError)) throw error;
             text = error.status === 500 ? '服务配置不完整，请联系管理员。' : error.message;

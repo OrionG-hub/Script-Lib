@@ -16,7 +16,11 @@ https://raw.example.com/repository/config.yaml
 https://raw.example.com/repository/config.yaml?ref=feature%2Ffoo
 ```
 
-Bot 返回 `https://go.example.com/abc12`。短码由 Shlink 生成，长度沿用 Shlink 配置；相同目标使用 `findIfExists` 请求复用。
+Bot 使用去掉最后一个扩展名的文件名作为短码，例如 `Clash.yaml` → `https://go.example.com/Clash`；大小写保留，空格转为连字符。相同目标复用已有文件名短链；原随机短链继续有效。
+
+名称被其他目标占用时，Bot 提示冲突，不覆盖、不自动加序号。可发送 `/short MyClash 链接` 指定新名称；之后单独发送该文件的 Gitea 或 Raw 链接也会返回已指定的短链。名称支持 1–128 个中英文、数字、点、下划线或连字符，不能是 `.` 或 `..`。
+
+文件名短链使用 `gitea-raw` 和 `gitea-raw-named` 标签记录在 Shlink 中。Bot 先查询同目标的文件名短链，再使用 `customSlug` 与 `findIfExists` 创建或复用；不会删除或覆盖旧短链。
 
 Gitea 原链接与对应的 Cloudflare Raw 代理链接会使用相同目标，复用已有短链；没有记录时才创建。代理链接保留 `ref`，默认分支的显式 `ref` 会省略，输入中的 Token、其他查询参数和片段不沿用；私库统一使用配置中的 TOKEN。
 
