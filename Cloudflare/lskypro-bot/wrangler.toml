@@ -31,7 +31,7 @@ persist = true
 head_sampling_rate = 1
 
 [vars]
-ALLOWED_TELEGRAM_USER_IDS = "1050736994"
+ALLOWED_TELEGRAM_USER_IDS = "313208759"
 LSKY_API_URL = "https://img.orionc.me/api/v1/upload"
 LSKY_PERMISSION = "1"
 SHLINK_API_URL = "https://go.orionc.me"
