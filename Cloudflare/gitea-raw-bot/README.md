@@ -1,6 +1,6 @@
 # Gitea Raw Bot
 
-Cloudflare Worker：代理 Gitea Raw 文件，Telegram 私聊发送文件链接后，通过 Shlink 返回短链。无需 D1、KV 或 R2。
+Cloudflare Worker：代理 Gitea Raw 文件，Telegram 私聊发送文件链接后，通过 Shlink 返回短链，并引用原消息回复。无需 D1、KV 或 R2。
 
 ## 使用方式
 
@@ -99,19 +99,13 @@ PY
 
 ## 私库访问：沿用 Raw TOKEN
 
-**Bot 不接收、不返回 TOKEN；Shlink 保存的目标也不包含 TOKEN。** Shlink 不是鉴权层，短链本身不能绕过私库验证。
+**私库短链自动携带配置中的 Raw TOKEN，无需手动追加参数。** Bot 将 `token` 写入 Shlink 保存的 Raw 目标地址，回复保持为简洁短链；分支、标签和提交信息仍保留。公开仓库目标不附加 Token，输入链接中的查询参数不会被沿用。
 
-浏览器可在短链后追加自己持有的 Token：
-
-```text
-https://go.example.com/abc12?token=你的RawToken
-```
-
-创建短链时设置 `forwardQuery: true`，Shlink 应将 `token` 转发给目标；非默认分支目标已有 `ref` 时，应合并查询参数。此行为需要在你使用的 Shlink 版本中联调确认。已有被复用的旧短链也需要检查是否启用了参数转发。
+已有不带 Token 的旧短链不会自动修改，请重新发送文件链接生成可直接访问的短链。更换 TOKEN 后也需重新生成私库短链。
 
 也可以直接访问 Raw，使用 `Authorization: Bearer <TOKEN>`。注意多数 HTTP 客户端跨域跳转时会移除 Authorization；使用请求头鉴权时，先取得 Shlink 的 `Location`，确认它属于自己的 Raw 域名，再向该 Raw 地址发送 Bearer 请求。不要为方便跳转而向任意域名转发凭据。
 
-查询参数里的 Token 可能进入浏览器历史和代理日志，请避免分享带 Token 的链接。项目关闭 Worker 自动 invocation 日志，并且不自行记录完整 URL 或凭据。
+私库短链包含访问权限，只分享给有权访问的人；目标中的 Token 会保存在 Shlink 中，也可能进入浏览器历史和代理日志。项目关闭 Worker 自动 invocation 日志，并且不自行记录完整 URL 或凭据。
 
 ## 路由与缓存
 

@@ -1,12 +1,13 @@
 import { HttpError, reply, required, httpsBase, config, segments, allowed, apiRoot, upstream, readJson, safeEqual, rawLink } from './common.js';
 import { repositoryInfo, giteaHeaders } from './raw.js';
 
-const HELP = '发送一个 Gitea 文件链接（src/branch、raw/branch、src/tag 或 src/commit），返回保留版本的 Shlink 短链。私库访问仍需自行携带 Raw Token。';
-async function send(env, chatId, text) {
+const HELP = '发送一个 Gitea 文件链接（src/branch、raw/branch、src/tag 或 src/commit），返回保留版本的 Shlink 短链。私库短链自动携带 Raw Token，可直接访问。';
+async function send(env, chatId, messageId, text) {
     const token = required(env, 'TELEGRAM_BOT_TOKEN');
     const response = await upstream(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, text, link_preview_options: { is_disabled: true } })
+        body: JSON.stringify({ chat_id: chatId, text, link_preview_options: { is_disabled: true },
+            reply_parameters: { message_id: messageId, allow_sending_without_reply: true } })
     });
     if (!response.ok || !(await readJson(response, 'Telegram')).ok) throw new HttpError('Telegram reply failed.', 502);
 }
@@ -43,7 +44,9 @@ export async function convert(input, env) {
         if (!ref) throw new HttpError('找不到对应分支或标签。', 404);
     }
     if (kind === 'tag') ref = `refs/tags/${ref}`;
-    return { longUrl: rawLink(env, repo, file, ref, kind === 'branch' ? info.defaultBranch : null), private: info.requiresAuth };
+    const target = new URL(rawLink(env, repo, file, ref, kind === 'branch' ? info.defaultBranch : null));
+    if (info.requiresAuth) target.searchParams.set('token', required(env, 'TOKEN'));
+    return { longUrl: target.href, private: info.requiresAuth };
 }
 export async function shorten(longUrl, env) {
     const base = httpsBase(required(env, 'SHLINK_API_URL'));
@@ -74,13 +77,12 @@ export async function webhook(request, env) {
         try {
             const link = await convert(message.text, env);
             text = await shorten(link.longUrl, env);
-            if (link.private) text += '\n私有仓库：访问时请自行携带 Raw Token；短链不包含 Token。';
         } catch (error) {
             if (!(error instanceof HttpError)) throw error;
             text = error.status === 500 ? '服务配置不完整，请联系管理员。' : error.message;
         }
     }
     // Await delivery. Returning success earlier would lose errors and prevent retries.
-    await send(env, message.chat.id, text);
+    await send(env, message.chat.id, message.message_id, text);
     return reply('OK');
 }
