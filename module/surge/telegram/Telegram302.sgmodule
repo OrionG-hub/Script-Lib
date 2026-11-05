@@ -4,6 +4,6 @@
 #!arguments=CLIENT:Regram
 #!arguments-desc=默认 Regram，无需填写；切换时填写上述客户端名称。Telegram 保持原链接，不进行重定向。需启用 MITM 并信任证书。
 [Script]
-Telegram 链接重定向 = type=http-request, pattern=^https?://(?:t\.me|telegram\.me)/.+, script-path=https://raw.orionc.me/proxy/module/surge/js/Telegram302.js?token=orion-raw-19990126, timeout=10, argument="{{{CLIENT}}}"
+Telegram 链接重定向 = type=http-request, pattern=^https?://(?:t\.me|telegram\.me)/.+, script-path=https://raw.githubusercontent.com/OrionG-hub/Script-Lib/refs/heads/master/module/surge/telegram/js/Telegram302.js, timeout=10, argument="{{{CLIENT}}}"
 [MITM]
 hostname = %APPEND% t.me, telegram.me
