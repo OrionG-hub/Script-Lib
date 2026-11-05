@@ -1,12 +1,12 @@
 /**
- * Surge: t.me -> Telegram 客户端重定向
+ * Telegram302: Surge t.me -> Telegram 客户端重定向
  * 客户端名称由模块参数 CLIENT 通过 $argument 传入。
  */
 
 const SCHEME = {
   Telegram: "tg",
+  Regram: "rg",
   Nagram: "tg",
-  NyuGram: "nyugram",
   Swiftgram: "sg",
   Turrit: "turrit",
   iMe: "ime",

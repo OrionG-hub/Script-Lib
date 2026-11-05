@@ -1,9 +1,0 @@
-#!name=Telegram 跳转
-#!desc=将 Telegram 链接重定向到指定客户端。可选：Telegram、Nagram、NyuGram、Swiftgram、Turrit、iMe、Nicegram、Lingogram。
-#!author=pandaX
-#!arguments=CLIENT:Telegram
-#!arguments-desc=填写客户端名称；选择 Telegram 时保持原链接，不进行重定向。
-[Script]
-Telegram 链接重定向 = type=http-request, pattern=^https?://(?:t\.me|telegram\.me)/.+, script-path=https://raw.githubusercontent.com/OrionG-hub/Script-Lib/refs/heads/master/module/surge/telegram/js/TgRedirect.surge.js, timeout=10, argument="{{{CLIENT}}}"
-[MITM]
-hostname = %APPEND% t.me, telegram.me
